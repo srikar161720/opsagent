@@ -1,0 +1,53 @@
+# configs/agent_config.yaml
+# Agent configuration for the OpsAgent LangGraph investigation workflow.
+
+agent:
+  llm:
+    model: "gemini-1.5-flash"   # Primary LLM for reasoning and report generation
+    temperature: 0.1            # Near-deterministic for reproducible RCA reports
+    max_output_tokens: 4096     # Sufficient for a complete RCA report
+    # API key: loaded from GEMINI_API_KEY environment variable via python-dotenv
+    # Never hardcode API keys here
+
+  investigation:
+    max_tool_calls: 10          # Hard cap on agent tool use per investigation
+                                # Prevents runaway API costs and infinite loops
+    confidence_threshold: 0.7   # Stop iterating once counterfactual confidence >= 0.7
+                                # Prevents over-investigation when root cause is clear
+    timeout_seconds: 300        # Abort investigation if it exceeds 5 minutes
+
+  tools:
+    # Tool: query_metrics (queries Prometheus)
+    query_metrics:
+      prometheus_url: "http://localhost:9090"
+      default_time_range_minutes: 30     # Look back 30 min from anomaly timestamp
+      max_data_points: 500               # Limit response size
+
+    # Tool: search_logs (queries Loki)
+    search_logs:
+      loki_url: "http://localhost:3100"
+      default_limit: 100                 # Max log lines per query
+      default_time_range_minutes: 30
+
+    # Tool: get_topology (reads NetworkX graph)
+    get_topology:
+      topology_file: "data/baseline/topology.json"  # Pre-built service dependency graph
+
+    # Tool: search_runbooks (queries ChromaDB)
+    search_runbooks:
+      chroma_persist_dir: "data/chromadb/"
+      collection_name: "runbooks"
+      top_k: 3                           # Return top-3 most relevant runbook chunks
+      embedding_model: "all-MiniLM-L6-v2"  # sentence-transformers model
+
+    # Tool: discover_causation (runs PC algorithm via causal-learn)
+    discover_causation:
+      alpha: 0.05             # Statistical significance threshold for edge inclusion
+      lags: [1, 2, 5]         # Time lags (in windows) to include as features
+                              # Lag 1 = 1 min ago, lag 2 = 2 min ago, lag 5 = 5 min ago
+
+causal_discovery:
+  algorithm: "pc"             # PC (Peter-Clark) algorithm from causal-learn library
+  alpha: 0.05                 # Significance threshold (should match tools.discover_causation.alpha)
+  max_conditioning_set: 3     # Cap on conditioning set size; limits computational cost
+                              # Larger values = more accurate but exponentially slower

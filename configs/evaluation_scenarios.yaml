@@ -1,0 +1,123 @@
+# configs/evaluation_scenarios.yaml
+# Fault injection scenario definitions and evaluation runner settings.
+# Fault scripts: demo_app/fault_scenarios/  (01_service_crash.sh ... 08_config_error.sh)
+# Runner:        scripts/inject_faults.py
+
+# OTel Demo Fault Scenarios
+# 8 fault types x 5 repetitions = 40 total test cases
+# Run order: easy -> medium -> hard
+fault_types:
+  - name: "service_crash"
+    script: "demo_app/fault_scenarios/01_service_crash.sh"
+    target_service: "cartservice"
+    ground_truth: "cartservice"
+    difficulty: "easy"
+    expected_detection_seconds: 30
+    cooldown_seconds: 120
+
+  - name: "high_latency"
+    script: "demo_app/fault_scenarios/02_high_latency.sh"
+    target_service: "paymentservice"
+    ground_truth: "paymentservice"
+    difficulty: "easy"
+    expected_detection_seconds: 60
+    cooldown_seconds: 120
+    injection_params:
+      latency_ms: 500
+
+  - name: "memory_pressure"
+    script: "demo_app/fault_scenarios/03_memory_pressure.sh"
+    target_service: "checkoutservice"
+    ground_truth: "checkoutservice"
+    difficulty: "medium"
+    expected_detection_seconds: 120
+    cooldown_seconds: 180
+    injection_params:
+      memory_limit_mb: 128
+
+  - name: "cpu_throttling"
+    script: "demo_app/fault_scenarios/04_cpu_throttling.sh"
+    target_service: "productcatalogservice"
+    ground_truth: "productcatalogservice"
+    difficulty: "medium"
+    expected_detection_seconds: 120
+    cooldown_seconds: 180
+    injection_params:
+      cpus: 0.1
+
+  - name: "connection_exhaustion"
+    script: "demo_app/fault_scenarios/05_connection_exhaustion.sh"
+    target_service: "redis"
+    ground_truth: "redis"
+    difficulty: "medium"
+    expected_detection_seconds: 90
+    cooldown_seconds: 150
+    injection_params:
+      max_connections: 5
+
+  - name: "network_partition"
+    script: "demo_app/fault_scenarios/06_network_partition.sh"
+    target_service: "paymentservice"
+    ground_truth: "paymentservice"
+    difficulty: "medium"
+    expected_detection_seconds: 45
+    cooldown_seconds: 120
+
+  - name: "cascading_failure"
+    script: "demo_app/fault_scenarios/07_cascading_failure.sh"
+    target_service: "cartservice"
+    ground_truth: "cartservice"
+    difficulty: "hard"
+    expected_detection_seconds: 60
+    cooldown_seconds: 240
+
+  - name: "config_error"
+    script: "demo_app/fault_scenarios/08_config_error.sh"
+    target_service: "currencyservice"
+    ground_truth: "currencyservice"
+    difficulty: "hard"
+    expected_detection_seconds: 30
+    cooldown_seconds: 120
+    injection_params:
+      env_var: "DATABASE_URL"
+      invalid_value: "invalid://bad-url"
+
+# Evaluation Runner Settings
+evaluation:
+  repetitions_per_fault: 5
+  baseline_duration_hours: 24
+  results_output_path: "data/evaluation/results/"
+  explanation_quality_scores_path: "data/evaluation/explanation_quality_scores.csv"
+
+  metrics:
+    - "recall_at_1"
+    - "recall_at_3"
+    - "precision"
+    - "detection_latency"
+    - "mttr_proxy"
+    - "explanation_quality"
+
+  baselines:
+    - name: "rule_based"
+    - name: "ad_only"
+    - name: "llm_no_tools"
+
+  # Cross-System Validation (RCAEval)
+  rcaeval_evaluation:
+    enabled: true
+    variants: ["re1", "re2", "re3"]
+    results_output_path: "data/evaluation/rcaeval_results/"
+    compare_against_published_baselines: true
+    published_baselines: ["BARO", "CIRCA", "RCD", "CausalRCA", "MicroHECL"]
+
+  # LogHub HDFS Anomaly Detection Benchmark (Nice-to-Have)
+  loghub_benchmark:
+    enabled: false
+    stages:
+      - name: "untrained"
+        checkpoint: null
+      - name: "pretrained"
+        checkpoint: "models/lstm_autoencoder/pretrained_hdfs.pt"
+      - name: "finetuned"
+        checkpoint: "models/lstm_autoencoder/finetuned_otel.pt"
+    target_f1: 0.90

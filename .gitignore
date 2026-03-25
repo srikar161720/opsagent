@@ -1,0 +1,37 @@
+# Environment
+.env
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Type checking / linting
+.mypy_cache/
+.ruff_cache/
+
+# Data and models (large files)
+data/
+models/*.pt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Docker
+docker-compose.override.yml

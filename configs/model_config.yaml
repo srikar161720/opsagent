@@ -1,0 +1,54 @@
+# configs/model_config.yaml
+# ML model hyperparameters for OpsAgent anomaly detection.
+
+anomaly_detection:
+  lstm_autoencoder:
+    # input_dim is determined dynamically at training time from Drain3 template count
+    # (typically 50–200 unique templates; do not hardcode)
+    embedding_dim: 32       # Template embedding dimension
+    hidden_dim: 64          # LSTM hidden state size
+    latent_dim: 16          # Compressed bottleneck representation
+    num_layers: 2           # Encoder and decoder depth (each)
+    dropout: 0.2            # Applied between LSTM layers
+    sequence_length: 10     # MUST match dataset_config.yaml: loghub_hdfs.sequence_length
+                            #   10 windows x 60s = 10 minutes of history per sequence
+
+  isolation_forest:
+    n_estimators: 100       # Number of trees
+    contamination: 0.01     # Expected anomaly fraction during normal operation
+    max_samples: 256        # Subsample size per tree
+
+  threshold:
+    method: "percentile"    # Options: "percentile", "fixed", "std_dev"
+    percentile: 95          # Flag sequences with reconstruction error > 95th percentile
+                            # Computed on normal (baseline) training data only
+
+training:
+  # Phase 1: Pretraining on LogHub HDFS
+  # Goal: Learn general log anomaly patterns from a large-scale distributed system.
+  # Run on Google Colab Pro (T4/L4/A100).
+  pretrain:
+    dataset: "loghub_hdfs"
+    data_path: "data/LogHub/HDFS/"
+    batch_size: 64
+    epochs: 50
+    early_stopping_patience: 5
+    learning_rate: 0.001
+    optimizer: "adam"
+    loss: "mse"             # Mean Squared Error on reconstruction
+    checkpoint: "models/lstm_autoencoder/pretrained_hdfs.pt"  # Must match finetune.pretrained_checkpoint
+
+  # Phase 2: Fine-tuning on OpenTelemetry Demo
+  # Goal: Specialize pretrained weights to the target microservice environment.
+  # Uses lower LR (10x smaller) to preserve general patterns learned in Phase 1.
+  finetune:
+    dataset: "otel_demo"
+    pretrained_checkpoint: "models/lstm_autoencoder/pretrained_hdfs.pt"  # Must match pretrain.checkpoint
+    batch_size: 32
+    epochs: 30
+    early_stopping_patience: 10
+    learning_rate: 0.0001   # 10x smaller than pretraining to avoid catastrophic forgetting
+    optimizer: "adam"
+    loss: "mse"
+    validation_split: 0.2
+    checkpoint: "models/lstm_autoencoder/finetuned_otel.pt"
