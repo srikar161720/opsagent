@@ -1,0 +1,20 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+rule_files:
+  - "alert_rules.yml"
+
+scrape_configs:
+  # Container-level metrics via Docker Stats Exporter
+  # (replaces cAdvisor which cannot discover containers on macOS Docker Desktop)
+  - job_name: 'docker-stats-exporter'
+    static_configs:
+      - targets: ['docker-stats-exporter:9101']
+    scrape_interval: 15s
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

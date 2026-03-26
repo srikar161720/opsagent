@@ -1,0 +1,26 @@
+groups:
+  - name: opsagent_alerts
+    rules:
+      - alert: HighMemoryUsage
+        expr: container_memory_usage_bytes{container_label_com_docker_compose_service=~".+"} > 400000000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ $labels.container_label_com_docker_compose_service }}"
+
+      - alert: HighCPUUsage
+        expr: rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service=~".+"}[1m]) > 0.8
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage on {{ $labels.container_label_com_docker_compose_service }}"
+
+      - alert: ContainerRestarting
+        expr: increase(container_last_seen{container_label_com_docker_compose_service=~".+"}[5m]) == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Container {{ $labels.container_label_com_docker_compose_service }} may be down"
