@@ -1,0 +1,125 @@
+# demo_app/docker-compose.demo.yml
+# OpenTelemetry Demo microservices (reduced to 6 core services for 16GB RAM budget).
+# Excluded: adservice, recommendationservice, emailservice, shippingservice.
+
+services:
+
+  frontend:
+    image: ghcr.io/open-telemetry/demo:1.7.0-frontend
+    ports:
+      - "8080:8080"
+    environment:
+      - FRONTEND_PORT=8080
+      - PRODUCT_CATALOG_SERVICE_ADDR=productcatalogservice:3550
+      - CURRENCY_SERVICE_ADDR=currencyservice:7001
+      - CART_SERVICE_ADDR=cartservice:7070
+      - CHECKOUT_SERVICE_ADDR=checkoutservice:5050
+    depends_on:
+      - productcatalogservice
+      - cartservice
+      - checkoutservice
+      - currencyservice
+    networks:
+      - opsagent-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  cartservice:
+    image: ghcr.io/open-telemetry/demo:1.7.0-cartservice
+    environment:
+      - CART_SERVICE_PORT=7070
+      - REDIS_ADDR=redis:6379
+    depends_on:
+      - redis
+    networks:
+      - opsagent-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  checkoutservice:
+    image: ghcr.io/open-telemetry/demo:1.7.0-checkoutservice
+    environment:
+      - CHECKOUT_SERVICE_PORT=5050
+      - CART_SERVICE_ADDR=cartservice:7070
+      - CURRENCY_SERVICE_ADDR=currencyservice:7001
+      - PAYMENT_SERVICE_ADDR=paymentservice:50051
+      - PRODUCT_CATALOG_SERVICE_ADDR=productcatalogservice:3550
+    networks:
+      - opsagent-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  paymentservice:
+    image: ghcr.io/open-telemetry/demo:1.7.0-paymentservice
+    environment:
+      - PAYMENT_SERVICE_PORT=50051
+    networks:
+      - opsagent-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  productcatalogservice:
+    image: ghcr.io/open-telemetry/demo:1.7.0-productcatalogservice
+    environment:
+      - PRODUCT_CATALOG_SERVICE_PORT=3550
+    networks:
+      - opsagent-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  currencyservice:
+    image: ghcr.io/open-telemetry/demo:1.7.0-currencyservice
+    environment:
+      - CURRENCY_SERVICE_PORT=7001
+    networks:
+      - opsagent-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  redis:
+    image: redis:7-alpine
+    networks:
+      - opsagent-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  loadgenerator:
+    image: ghcr.io/open-telemetry/demo:1.7.0-loadgenerator
+    environment:
+      - FRONTEND_ADDR=frontend:8080
+      - USERS=5
+    depends_on:
+      - frontend
+    networks:
+      - opsagent-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+networks:
+  opsagent-net:
+    external: true
+    name: opsagent_opsagent-net
