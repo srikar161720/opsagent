@@ -1,7 +1,7 @@
 # Infrastructure & Serving Specifications
 
 **Implementation files:**
-- `docker-compose.yml` — Main monitoring + message queue stack
+- `docker-compose.yml` — Main monitoring + message queue stack + Docker Stats Exporter
 - `demo_app/docker-compose.demo.yml` — OTel Demo microservices (reduced)
 - `infrastructure/prometheus/prometheus.yml` — Prometheus scrape config
 - `infrastructure/loki/loki-config.yml` — Loki storage config
@@ -22,6 +22,7 @@
 | Prometheus | 9090 | http://localhost:9090 |
 | Loki | 3100 | http://localhost:3100 |
 | Kafka | 9092 | localhost:9092 |
+| Docker Stats Exporter | 9101 | http://localhost:9101 |
 | OpsAgent API | 8000 | http://localhost:8000 |
 | Streamlit Dashboard | 8501 | http://localhost:8501 |
 
@@ -130,11 +131,35 @@ services:
           memory: 1536M      # Kafka needs significant heap
           cpus: '1.0'
 
+  # ── Container Metrics ────────────────────────────────────────────────
+  docker-stats-exporter:
+    build: ./infrastructure/docker_stats_exporter
+    ports:
+      - "9101:9101"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - opsagent-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+
+networks:
+  opsagent-net:
+    driver: bridge
+
 volumes:
   prometheus_data:
   grafana_data:
   loki_data:
 ```
+
+> **Note:** All services use a shared `opsagent-net` bridge network. The OTel Demo compose file references this as an external network (`opsagent_opsagent-net`).
+
+> **macOS note:** cAdvisor was originally used for container metrics but cannot discover individual containers on macOS Docker Desktop (cgroupv2 + VM-based Docker). It was replaced with a custom Docker Stats Exporter that queries the Docker API directly via the Python `docker` SDK. The exporter uses a background collection thread to avoid Prometheus scrape timeouts.
 
 ---
 
@@ -262,11 +287,12 @@ services:
 | Prometheus | 512 MB | 0.5 | 7-day metric retention |
 | Loki | 512 MB | 0.5 | Log storage + query |
 | Grafana | 256 MB | 0.25 | Dashboard rendering |
+| Docker Stats Exporter | 128 MB | 0.25 | Container metrics exporter (queries Docker API) |
 | OTel Demo (6 services) | ~1.5 GB | ~1.5 | ~256 MB each |
 | Redis | 128 MB | — | Small in-memory store |
 | Load Generator | 256 MB | — | Synthetic traffic |
 | OpsAgent (API + Dashboard) | 1 GB | 1.0 | Agent + ML model in memory |
-| **Total** | **~7 GB** | **~5 cores** | Leaves ~9 GB for OS/IDE on 16 GB Mac |
+| **Total** | **~7.25 GB** | **~5.25 cores** | Leaves ~8.75 GB for OS/IDE on 16 GB Mac |
 
 > **Note:** RCAEval and LogHub HDFS preprocessing are run **offline** (not as Docker services). HDFS pretraining is run on Google Colab Pro. Neither adds to the Docker memory budget above.
 
@@ -275,6 +301,8 @@ services:
 ## 4. Infrastructure Configuration Files
 
 ### 4.1 Prometheus — `infrastructure/prometheus/prometheus.yml`
+
+> **Architecture decision:** OTel Demo services use gRPC and don't expose native Prometheus `/metrics` endpoints. Instead of adding an OTel Collector, we use a custom Docker Stats Exporter that queries the Docker API directly and exposes container-level metrics (CPU, memory, network) in Prometheus format. This replaces cAdvisor, which cannot discover containers on macOS Docker Desktop.
 
 ```yaml
 global:
@@ -286,26 +314,17 @@ rule_files:
   - "alert_rules.yml"
 
 scrape_configs:
-  - job_name: 'otel-demo'
+  # Container-level metrics via Docker Stats Exporter
+  # (replaces cAdvisor which cannot discover containers on macOS Docker Desktop)
+  - job_name: 'docker-stats-exporter'
     static_configs:
-      - targets:
-          - 'frontend:8080'
-          - 'cartservice:7070'
-          - 'checkoutservice:5050'
-          - 'paymentservice:50051'
-          - 'productcatalogservice:3550'
-          - 'currencyservice:7001'
-    metrics_path: '/metrics'
+      - targets: ['docker-stats-exporter:9101']
     scrape_interval: 15s
 
-  - job_name: 'redis'
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
     static_configs:
-      - targets: ['redis:6379']
-
-  - job_name: 'opsagent'
-    static_configs:
-      - targets: ['opsagent:8000']
-    metrics_path: '/metrics'
+      - targets: ['localhost:9090']
 ```
 
 **`infrastructure/prometheus/alert_rules.yml`** (optional — for the Watchdog trigger)
@@ -440,8 +459,8 @@ set -e
 
 echo "=== OpsAgent Infrastructure Startup ==="
 
-echo "[1/4] Starting monitoring stack (Prometheus, Grafana, Loki, Kafka)..."
-docker compose up -d prometheus grafana loki zookeeper kafka
+echo "[1/4] Starting monitoring stack (Prometheus, Grafana, Loki, Kafka, Docker Stats Exporter)..."
+docker compose up -d --build prometheus grafana loki zookeeper kafka docker-stats-exporter
 
 echo "[2/4] Waiting for monitoring stack to be healthy (30s)..."
 sleep 30

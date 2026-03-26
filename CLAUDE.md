@@ -20,7 +20,7 @@
 |---|---|---|
 | **Orchestration** | Docker Compose | Local multi-service stack |
 | **Target System** | OpenTelemetry Demo (reduced, 6 services) | Source of microservice logs and metrics |
-| **Metrics** | Prometheus + Grafana | Metrics collection and visualization |
+| **Metrics** | Prometheus + Grafana + Docker Stats Exporter | Container-level metrics collection and visualization |
 | **Logs** | Loki + Kafka | Log aggregation and stream ingestion |
 | **Log Parsing** | Drain3 | Template extraction from raw logs |
 | **Feature Engineering** | Pandas + NumPy | Windowed aggregations and feature vectors |
@@ -90,7 +90,7 @@ make setup                            # poetry install (all dependencies)
 poetry run python <script>            # Run within Poetry env
 
 # Infrastructure
-make infra-up                         # Start Docker stack (Prometheus, Grafana, Loki, Kafka)
+make infra-up                         # Start Docker stack (Prometheus, Grafana, Loki, Kafka, Docker Stats Exporter)
 make infra-down                       # Tear down Docker stack
 make demo-up                          # Start OTel Demo app
 make demo-down                        # Stop OTel Demo app
@@ -139,12 +139,16 @@ Copy `.env.example` to `.env` and populate before running any component that use
 | **Create model after corpus parse** | Always call `preprocessor.parse()` first, then read `preprocessor.num_templates` → `input_dim`. Template count grows during parsing and is only finalized after the full corpus. |
 | **`_load_compatible_weights` is not a bug** | `RuntimeError` from `load_state_dict` during fine-tuning is expected — HDFS and OTel feature dims differ by design. The function loads only LSTM body weights; embedding and output layers are reinitialized. |
 | **`model.eval()` at inference** | Always call `model.eval()` and wrap in `torch.no_grad()` during reconstruction error scoring. Forgetting leaves dropout active → noisy errors → unstable threshold. |
-| **Docker memory budget ~7GB** | OTel Demo (6 services) + monitoring stack saturates ~7GB RAM. Process RCAEval and LogHub data offline as standalone scripts — never inside Docker. |
+| **Docker memory budget ~7.25GB** | OTel Demo (6 services) + monitoring stack + Docker Stats Exporter saturates ~7.25GB RAM. Process RCAEval and LogHub data offline as standalone scripts — never inside Docker. |
 | **`poetry run` required** | Never run `python` directly; always prefix with `poetry run python` to use the correct virtual environment. |
 | **Intel Mac (x86_64) constraints** | PyTorch >=2.3 and onnxruntime >=1.20 dropped macOS x86_64 wheels. `pyproject.toml` pins `torch>=2.0,<2.3` and `onnxruntime>=1.17,<1.20`. Relax these if migrating to Apple Silicon or Linux. |
 | **RCAEval without `[default]` extras** | RCAEval's `[default]` extras pin `torch==1.12.1`. We install the base package only and manage torch ourselves. `import RCAEval` works; evaluation utilities are available. |
 | **numpy <2.0 required** | numpy is pinned to `<2.0` for compatibility with torch 2.2.x and the broader dependency tree. |
 | **Poetry PATH setup** | Poetry is at `~/.local/bin/poetry`, pipx at `~/Library/Python/3.13/bin/pipx`. Prefix commands with `export PATH="$HOME/.local/bin:$HOME/Library/Python/3.13/bin:$PATH"` if not in shell profile. |
+| **Docker Stats Exporter replaces cAdvisor** | OTel Demo services use gRPC and don't expose Prometheus `/metrics` endpoints. A custom Docker Stats Exporter queries the Docker API directly and exposes container metrics (CPU, memory, network) in Prometheus format on port 9101. cAdvisor was replaced because it cannot discover individual containers on macOS Docker Desktop (cgroupv2 + VM-based Docker). |
+| **No log shipper yet** | Loki is running but empty — no Promtail or Docker logging driver is configured. Log collection returns 0 entries. Promtail must be added to `docker-compose.yml` before logs can be collected. Adding Promtail requires a stack restart. |
+| **macOS sleep during long collections** | Use `caffeinate -s` to prevent macOS sleep during 24h data collection. Mac must be plugged into AC power. Example: `caffeinate -s poetry run python scripts/generate_training_data.py --duration 24h`. |
+| **Data collection resume** | `generate_training_data.py` supports resume — if interrupted, re-running the same command picks up from the last snapshot via `metadata.json`. The Docker stack must remain running throughout. |
 
 ---
 

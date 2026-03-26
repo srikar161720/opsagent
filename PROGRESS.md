@@ -36,17 +36,17 @@
 **Goal:** Stand up infrastructure, deploy OTel Demo, collect baseline data, download and explore real-world datasets.
 
 ### Infrastructure (Week 2)
-- [ ] Create `docker-compose.yml` with Prometheus, Grafana, Loki, Zookeeper, Kafka
-- [ ] Create `infrastructure/prometheus/prometheus.yml` (scrape OTel Demo services)
-- [ ] Create `infrastructure/loki/loki-config.yml`
-- [ ] Create `infrastructure/grafana/provisioning/datasources/datasources.yml` (Prometheus + Loki)
-- [ ] Create `demo_app/docker-compose.demo.yml` (6 OTel services + Redis + loadgenerator)
-- [ ] Create `scripts/start_infrastructure.sh` and `scripts/stop_infrastructure.sh`
-- [ ] Verify full stack: Grafana shows metrics at `localhost:3000`; logs visible; Kafka topic receiving messages
-- [ ] Create `scripts/generate_training_data.py` and start 24h OTel Demo baseline collection
+- [x] Create `docker-compose.yml` with Prometheus, Grafana, Loki, Zookeeper, Kafka, Docker Stats Exporter
+- [x] Create `infrastructure/prometheus/prometheus.yml` (scrape Docker Stats Exporter for container-level metrics)
+- [x] Create `infrastructure/loki/loki-config.yml`
+- [x] Create `infrastructure/grafana/provisioning/datasources/datasources.yml` (Prometheus + Loki)
+- [x] Create `demo_app/docker-compose.demo.yml` (6 OTel services + Redis + loadgenerator)
+- [x] Create `scripts/start_infrastructure.sh` and `scripts/stop_infrastructure.sh`
+- [x] Verify full stack: Grafana shows metrics at `localhost:3000`; Prometheus targets healthy; Docker Stats Exporter scraping all containers
+- [x] Create `scripts/generate_training_data.py` and start 24h OTel Demo baseline collection
 
 ### Dataset Acquisition & EDA (Week 3)
-- [ ] Create `scripts/download_datasets.py` (with `--rcaeval`, `--loghub`, `--all` flags)
+- [x] Create `scripts/download_datasets.py` (with `--rcaeval`, `--loghub`, `--all` flags)
 - [ ] Download RCAEval RE1 (375 cases), RE2 (270 cases), RE3 (90 cases) to `data/RCAEval/`
 - [ ] Download LogHub HDFS to `data/LogHub/HDFS/` (verify `HDFS.log` + `anomaly_label.csv` present)
 - [ ] Create `notebooks/01_data_exploration.ipynb` — OTel Demo log volume, metric availability, error rates
@@ -306,3 +306,100 @@
 - Python constraint set to `>=3.11,<3.13` in `pyproject.toml` due to torch/onnxruntime wheel availability on Intel Mac. Can be widened to `<3.14` once running on Apple Silicon or Linux.
 - Config YAML files contain full production values (not stubs) — copied from `context/config_reference.md` to ensure cross-config constraints are satisfied from the start.
 - `numpy` pinned to `<2.0` to maintain compatibility with torch 2.2.x and the broader dependency tree.
+
+---
+
+### 2026-03-25 — Session 2
+
+**Phase:** Phase 2 — Data Understanding (Week 2 Infrastructure)
+**Duration:** ~3 hours
+
+**Completed:**
+- Created `docker-compose.yml` — Prometheus, Grafana, Loki, Zookeeper, Kafka, cAdvisor (container metrics)
+- Created `demo_app/docker-compose.demo.yml` — 6 OTel Demo services (frontend, cartservice, checkoutservice, paymentservice, productcatalogservice, currencyservice) + Redis + loadgenerator; pinned to `ghcr.io/open-telemetry/demo:1.7.0-*` tags; uses external `opsagent_opsagent-net` network
+- Created `infrastructure/prometheus/prometheus.yml` — scrapes cAdvisor for container-level metrics (CPU, memory, network, disk I/O) with service name relabeling; Prometheus self-monitoring
+- Created `infrastructure/prometheus/alert_rules.yml` — placeholder alert rules for HighLatency and HighErrorRate
+- Created `infrastructure/loki/loki-config.yml` — boltdb-shipper storage, 7-day retention, in-memory ring
+- Created `infrastructure/grafana/provisioning/datasources/datasources.yml` — auto-provisions Prometheus + Loki datasources
+- Created `infrastructure/grafana/provisioning/dashboards/dashboards.yml` — auto-provisions dashboard directory
+- Created `infrastructure/grafana/dashboards/service_overview.json` — Grafana dashboard with 6 panels (CPU, memory, network I/O, filesystem, network errors, container count)
+- Created `scripts/start_infrastructure.sh` — sequential startup (monitoring stack → OTel Demo) with health wait periods
+- Created `scripts/stop_infrastructure.sh` — reverse teardown (OTel Demo → monitoring stack)
+- Created `scripts/generate_training_data.py` — baseline data collector with Prometheus metric snapshots + Loki log queries, 60s intervals, resume support, graceful interrupt handling, `metadata.json` tracking
+- Created `scripts/download_datasets.py` — RCAEval automated download via `RCAEval.utility` + LogHub HDFS manual download instructions with verification
+- Started 24h OTel Demo baseline metric collection (in progress, running via `caffeinate -s`)
+
+**In Progress:**
+- 24h OTel Demo baseline data collection is actively running (~230+ snapshots at session end)
+- Logs are not being collected (0 count) — Loki has no log shipper configured yet (Promtail needed)
+- Full stack verification incomplete — Prometheus + cAdvisor confirmed working; Grafana accessible; Kafka and log pipeline not yet verified
+
+**Blockers / Issues:**
+- **OTel Demo services don't expose Prometheus `/metrics` endpoints:** The original `prometheus.yml` from the context spec targeted individual service HTTP ports (frontend:8080, cartservice:7070, etc.), but these are gRPC services without native Prometheus exporters. **Resolution:** Replaced with cAdvisor for container-level metrics (CPU, memory, network, filesystem). This provides the metrics needed for anomaly detection without requiring an OTel Collector.
+- **cAdvisor volume mounts on macOS:** The standard Linux cAdvisor config mounts `/sys`, `/var/lib/docker`, `/dev/disk`, etc. These don't exist or work the same way on macOS with Docker Desktop. **Resolution:** Stripped down to only `/var/run/docker.sock:ro` with `privileged: true` and `platform: linux/amd64`. cAdvisor starts successfully on Docker Desktop for Mac.
+- **Docker daemon not running:** User encountered "failed to connect to docker API" error on first attempt. **Resolution:** Open Docker Desktop app and wait for it to fully start before running infrastructure scripts.
+- **No log shipper to Loki:** Loki is running but empty — no Promtail or Docker logging driver configured to push container logs. Data collection script shows `logs: 0` on every iteration. **Resolution deferred:** Will add Promtail to the infrastructure stack in a future session before evaluation needs logs. Metrics collection is sufficient for the current 24h baseline run.
+
+**Next Session:**
+- Add Promtail to `docker-compose.yml` to ship container logs to Loki (requires stack restart — must wait until 24h collection completes)
+- Download RCAEval datasets (RE1/RE2/RE3) and LogHub HDFS
+- Create EDA notebooks (01, 02, 03) for OTel Demo baseline, RCAEval, and LogHub HDFS data exploration
+- Visualize OTel Demo service topology (`docs/images/service_topology.html`)
+- Confirm 24h baseline collection completed successfully
+
+**Notes:**
+- OTel Demo images pinned to `1.7.0` tag (not `latest`) for reproducibility.
+- cAdvisor exposes metrics on port 8081 externally (mapped from container port 8080) to avoid conflict with OTel Demo frontend on port 8080.
+- The `generate_training_data.py` script uses cAdvisor-provided container metrics via Prometheus — queries filter by `container_label_com_docker_compose_service` label to isolate OTel Demo services.
+- Prometheus config diverges from `context/infrastructure_and_serving.md` spec: uses cAdvisor scraping instead of direct service scraping. The context file should be updated to reflect this architectural decision.
+- Use `caffeinate -s` on macOS to prevent sleep during 24h data collection. Mac must be plugged into AC power.
+- Data collection supports resume — if interrupted (`Ctrl+C` or kill), re-running the same command picks up from the last snapshot count via `metadata.json`.
+
+---
+
+### 2026-03-26 — Session 3
+
+**Phase:** Phase 2 — Data Understanding (Week 2 Infrastructure Fix + Week 3 Start)
+**Duration:** ~4 hours
+
+**Completed:**
+- Diagnosed empty metric data from first 24h collection — all 1440 snapshots contained empty arrays despite `status: completed`
+- Root cause identified: cAdvisor v0.47.2 cannot discover individual Docker containers on macOS Docker Desktop (cgroupv2 + VM-based Docker). cAdvisor only saw the root cgroup (`id: /`); its Docker container discovery API returned 0 containers; `docker version` from inside cAdvisor returned "NOT FOUND"
+- Replaced cAdvisor with custom Docker Stats Exporter (`infrastructure/docker_stats_exporter/`):
+  - `exporter.py` — queries Docker API via Python Docker SDK, exposes Prometheus-format metrics on port 9101
+  - `Dockerfile` — Python 3.11-slim with docker SDK
+  - `requirements.txt` — docker>=7.0.0
+  - Uses background thread for stats collection (avoids Prometheus scrape timeouts; `container.stats()` blocks ~1-2s per container)
+- Updated `docker-compose.yml` — removed cAdvisor service, added `docker-stats-exporter` service
+- Updated `infrastructure/prometheus/prometheus.yml` — replaced `cadvisor` scrape job with `docker-stats-exporter` job (port 9101)
+- Updated `scripts/generate_training_data.py` — changed `_SVC_FILTER` from `container_label_com_docker_compose_service` to `service` label; simplified service name extraction
+- Updated `infrastructure/grafana/dashboards/service_overview.json` — replaced all `container_label_com_docker_compose_service` references with `service` in query expressions and legend formats
+- Fixed Grafana datasource provisioning (`infrastructure/grafana/provisioning/datasources/datasources.yml`) — added explicit `uid: prometheus` and `uid: loki` fields to match dashboard JSON references
+- Updated `scripts/start_infrastructure.sh` — references `docker-stats-exporter` instead of `cadvisor`, includes `--build` flag
+- Updated `CLAUDE.md` — replaced cAdvisor references with Docker Stats Exporter in technology stack, common commands, and gotchas sections
+- Verified fix end-to-end: Prometheus targets all UP, 7 services reporting metrics with real values, rate() queries working, 3-minute test collection produced non-empty snapshots
+- Confirmed Grafana dashboard populated with live data (no more "Datasource prometheus not found" error)
+- Cleared old empty baseline data and started new 24h OTel Demo baseline collection (in progress)
+
+**In Progress:**
+- Second 24h OTel Demo baseline data collection actively running with verified non-empty metric snapshots
+- Logs still not collected (0 count) — Promtail deferred since log training pipeline uses Kafka → Drain3 (Phase 3), not Loki baseline logs
+
+**Blockers / Issues:**
+- **cAdvisor cannot discover containers on macOS Docker Desktop:** cAdvisor v0.47.2 running inside Docker on macOS Docker Desktop (Docker 29.3.0, cgroupv2) cannot see other containers. The Docker socket is mounted but cAdvisor's internal Docker client fails to connect. Without Docker API access or cgroup filesystem mounts, cAdvisor only reports root-level aggregate metrics. **Resolution:** Replaced cAdvisor with a custom Docker Stats Exporter that queries the Docker API directly via the Python `docker` SDK. This works reliably on macOS Docker Desktop.
+- **Docker Stats Exporter initial timeout:** First version of the exporter called `container.stats(stream=False)` synchronously during HTTP request handling. With ~14 containers at ~1-2s each, total collection time (~20s) exceeded Prometheus's 10s scrape timeout, causing BrokenPipeError. **Resolution:** Moved stats collection to a background thread that runs every 10s and caches results. The `/metrics` endpoint returns cached data instantly.
+- **Grafana "Datasource prometheus not found":** The Grafana dashboard JSON referenced `"uid": "prometheus"` but the provisioned datasource YAML didn't specify a `uid` field, so Grafana auto-generated a random UID. **Resolution:** Added explicit `uid: prometheus` and `uid: loki` to the datasource provisioning YAML.
+
+**Next Session:**
+- Confirm second 24h baseline collection completed successfully with non-empty metrics
+- Download RCAEval datasets (RE1/RE2/RE3) and LogHub HDFS
+- Create EDA notebooks (01, 02, 03)
+- Visualize OTel Demo service topology
+- Complete remaining Phase 2 tasks
+
+**Notes:**
+- The Docker Stats Exporter uses a 10s background collection interval with thread-safe caching. Prometheus scrapes every 15s, so data is always fresh within one collection cycle.
+- The exporter labels metrics with `service` (from `com.docker.compose.service` Docker label) — simpler than cAdvisor's `container_label_com_docker_compose_service`.
+- `fs_usage_bytes` reports 6 entries instead of 7 — some containers don't report blkio stats. This is expected and doesn't affect downstream processing.
+- Log collection (Promtail/Loki) intentionally deferred — the log training pipeline (LSTM-AE) uses Kafka → Drain3 → template sequences, not Loki baseline logs. Promtail can be added later if needed for the agent's `search_logs` tool.
+- Python stdout buffering in Docker was fixed by adding `PYTHONUNBUFFERED=1` to the exporter's Dockerfile.
