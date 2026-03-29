@@ -23,7 +23,7 @@ OpsAgent is evaluated across three independent tracks that collectively answer d
 | Track | Dataset | Cases | Primary Question |
 |---|---|---|---|
 | **Track 1: Primary (Fault Injection)** | OpenTelemetry Demo | 40 (8 types × 5 runs) | Does OpsAgent correctly identify root causes in its target environment? |
-| **Track 2: Cross-System Validation** | RCAEval RE1/RE2/RE3 | 735 total | Does OpsAgent generalize beyond its training environment? |
+| **Track 2: Cross-System Validation** | RCAEval RE1/RE2/RE3 | 736 total | Does OpsAgent generalize beyond its training environment? |
 | **Track 3: AD Benchmark** *(Nice-to-Have)* | LogHub HDFS | ~558K block sequences | How accurately does the LSTM-AE detect anomalies on a labeled benchmark? |
 
 ### 1.1 Target Outcomes
@@ -44,7 +44,7 @@ OpsAgent is evaluated across three independent tracks that collectively answer d
 | Week | Activities |
 |---|---|
 | Week 9 | Implement fault injection scripts; run all 40 OTel Demo tests (8 fault types × 5 runs, Days 1–4); false positive test under 24h normal operation (Day 5); evaluate 3 internal baselines |
-| Week 10 Days 1–2 | Run OpsAgent against RCAEval RE1 (375 cases), RE2 (270 cases), RE3 (90 cases) |
+| Week 10 Days 1–2 | Run OpsAgent against RCAEval RE1 (375 cases), RE2 (271 cases), RE3 (90 cases) |
 | Week 10 Days 3–5 | Calculate all metrics; manually score 25–30 RCA reports; create Visualizations 1–9; run statistical analysis; draft `docs/evaluation_results.md`; *(nice-to-have: run HDFS benchmark + Visualizations 10–11 if time permits)* |
 
 ---
@@ -312,7 +312,7 @@ python tests/evaluation/fault_injection_suite.py --fault cascading_failure --rep
 | Variant | Modalities | Fault Types | Cases | Purpose |
 |---|---|---|---|---|
 | **RE1** | Metrics only | CPU, MEM, DISK, DELAY, LOSS | 375 | Metrics-only generalization; run first |
-| **RE2** | Metrics + Logs + Traces | CPU, MEM, DISK, DELAY, LOSS, SOCKET | 270 | Multi-modal; primary comparison track |
+| **RE2** | Metrics + Logs + Traces | CPU, MEM, DISK, DELAY, LOSS, SOCKET | 271 | Multi-modal; primary comparison track (RE2-OB has 91 cases) |
 | **RE3** | Metrics + Logs + Traces | 5 code-level faults | 90 | Code-level fault generalization |
 
 > **RE1 can run before full deployment:** RE1 requires only the `query_metrics` agent tool (no Loki), so it can run as soon as the LSTM-AE and PC algorithm are working, before the full infrastructure stack is complete.
@@ -1037,7 +1037,7 @@ Lowest-scoring criterion: [criterion] (X.X average)
 | Variant | OpsAgent R@1 | CIRCA R@1 | BARO R@1 | RCD R@1 |
 |---|---|---|---|---|
 | RE1 (375 cases, metrics-only) | | | | |
-| RE2 (270 cases, multi-modal) | | | | |
+| RE2 (271 cases, multi-modal) | | | | |
 | RE3 (90 cases, code-level) | | | | |
 
 ### 2.2 Failure Analysis
@@ -1089,7 +1089,7 @@ is the relevant finding for this project.
 ### Track 2 — RCAEval
 - [ ] RCAEval adapter smoke-tested on all three variants
 - [ ] RE1 evaluation complete (375 cases)
-- [ ] RE2 evaluation complete (270 cases)
+- [ ] RE2 evaluation complete (271 cases)
 - [ ] RE3 evaluation complete (90 cases)
 - [ ] BARO, CIRCA, RCD baselines run on RE1 + RE2
 - [ ] Per-case JSONs in `data/evaluation/rcaeval_results/<variant>/`

@@ -242,7 +242,7 @@ rcaeval:
       path: "data/RCAEval/re2/"
       modalities: ["metrics", "logs", "traces"]  # Full multi-modal telemetry
       fault_types: ["cpu", "mem", "disk", "delay", "loss", "socket"]
-      total_cases: 270
+      total_cases: 271
       download_size_gb: 2.0
       # RE2 is the primary cross-system benchmark target (see evaluation_strategy.md)
 

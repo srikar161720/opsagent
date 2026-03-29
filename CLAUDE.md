@@ -47,7 +47,7 @@ Three complementary sources — each serves a distinct, non-overlapping purpose:
 |---|---|---|
 | **OpenTelemetry Demo** (self-generated via fault injection) | ~24h baseline + 40 fault tests | Primary training data and controlled evaluation with known ground truth |
 | **LogHub HDFS** (Zenodo DOI: 10.5281/zenodo.8196385) | 11M+ logs, block-level labels | LSTM-AE pretraining; Drain3 template validation; benchmark vs. DeepLog / LogRobust |
-| **RCAEval** RE1/RE2/RE3 (Zenodo DOI: 10.5281/zenodo.14590730) | 735 labeled failure cases | Cross-system RCA validation; comparison against 5 published baselines |
+| **RCAEval** RE1/RE2/RE3 (Zenodo DOI: 10.5281/zenodo.14590730) | 736 labeled failure cases | Cross-system RCA validation; comparison against 5 published baselines |
 
 ---
 
@@ -61,7 +61,7 @@ Three complementary sources — each serves a distinct, non-overlapping purpose:
 | Detection Latency | < 60 s | Timestamp: fault injection → alert |
 | MTTR Proxy | ≥ 50% reduction | vs. rule-based and AD-only baselines |
 | Explanation Quality | ≥ 4.0 / 5.0 | Manual rubric scoring |
-| RCAEval Recall@1 (RE2) | Competitive with CIRCA / RCD | 270-case cross-system validation |
+| RCAEval Recall@1 (RE2) | Competitive with CIRCA / RCD | 271-case cross-system validation |
 
 ---
 
@@ -142,13 +142,19 @@ Copy `.env.example` to `.env` and populate before running any component that use
 | **Docker memory budget ~7.25GB** | OTel Demo (6 services) + monitoring stack + Docker Stats Exporter saturates ~7.25GB RAM. Process RCAEval and LogHub data offline as standalone scripts — never inside Docker. |
 | **`poetry run` required** | Never run `python` directly; always prefix with `poetry run python` to use the correct virtual environment. |
 | **Intel Mac (x86_64) constraints** | PyTorch >=2.3 and onnxruntime >=1.20 dropped macOS x86_64 wheels. `pyproject.toml` pins `torch>=2.0,<2.3` and `onnxruntime>=1.17,<1.20`. Relax these if migrating to Apple Silicon or Linux. |
+| **RCAEval pip package is a stub** | The pip-installed `RCAEval` package only contains `is_ok()`. The `RCAEval.utility` module with download functions does not exist — it only exists in the GitHub source. `scripts/download_datasets.py` downloads directly from Zenodo API instead. |
 | **RCAEval without `[default]` extras** | RCAEval's `[default]` extras pin `torch==1.12.1`. We install the base package only and manage torch ourselves. `import RCAEval` works; evaluation utilities are available. |
+| **RCAEval RE2 case count** | RE2 has 271 cases (not 270 as documented), because RE2-OB has 91 cases instead of 90. RE1 has 375, RE3 has 90. Total: 736 cases. |
+| **RCAEval file format differences** | Three naming conventions, not two: (1) RE1-OB uses `data.csv` with simple `{service}_{metric}` columns (51 cols, 5 metric types). (2) RE1-SS/TT use `data.csv` but with container-metric naming (439-1246 cols). (3) All RE2/RE3 use `metrics.csv` with container-metric naming (389-1574 cols, 50 metric types). Infrastructure noise (GKE nodes, AWS IPs, `istio-init`) appears as service prefixes and must be filtered. Service names differ across systems (OB: `adservice`, SS: `carts`, TT: `ts-auth-service`). |
 | **numpy <2.0 required** | numpy is pinned to `<2.0` for compatibility with torch 2.2.x and the broader dependency tree. |
 | **Poetry PATH setup** | Poetry is at `~/.local/bin/poetry`, pipx at `~/Library/Python/3.13/bin/pipx`. Prefix commands with `export PATH="$HOME/.local/bin:$HOME/Library/Python/3.13/bin:$PATH"` if not in shell profile. |
 | **Docker Stats Exporter replaces cAdvisor** | OTel Demo services use gRPC and don't expose Prometheus `/metrics` endpoints. A custom Docker Stats Exporter queries the Docker API directly and exposes container metrics (CPU, memory, network) in Prometheus format on port 9101. cAdvisor was replaced because it cannot discover individual containers on macOS Docker Desktop (cgroupv2 + VM-based Docker). |
+| **Redis must be in `SERVICES` list** | `generate_training_data.py` has a `SERVICES` list for metadata and a `_SVC_FILTER` PromQL regex. Both must include `redis`. The Docker Stats Exporter exposes Redis metrics (it has the `com.docker.compose.service` label), and Redis is a fault injection target (`connection_exhaustion`). Omitting Redis from `SERVICES` causes metadata to report 6 services instead of 7, even though Redis data is present in snapshots. |
 | **No log shipper yet** | Loki is running but empty — no Promtail or Docker logging driver is configured. Log collection returns 0 entries. Promtail must be added to `docker-compose.yml` before logs can be collected. Adding Promtail requires a stack restart. |
 | **macOS sleep during long collections** | Use `caffeinate -s` to prevent macOS sleep during 24h data collection. Mac must be plugged into AC power. Example: `caffeinate -s poetry run python scripts/generate_training_data.py --duration 24h`. |
 | **Data collection resume** | `generate_training_data.py` supports resume — if interrupted, re-running the same command picks up from the last snapshot via `metadata.json`. The Docker stack must remain running throughout. |
+| **Baseline EDA findings** | 16 zero-variance metric pairs (all `network_rx/tx_errors_rate` + 2 `fs_usage_bytes`) — drop from training features. `memory_usage_bytes` and `memory_working_set_bytes` are perfectly correlated (r=1.0) for all services — drop `memory_usage_bytes`, keep `memory_working_set_bytes`. No outliers detected in 24h baseline (3σ rolling window). Cross-service correlations (`redis↔cartservice` network, `frontend↔paymentservice` TX) reflect real topology. |
+| **LogHub HDFS is 100% INFO level** | All log lines in HDFS.log are INFO level — anomaly detection cannot use log level as a feature. Detection must rely on Drain3 template sequence patterns. 100% of lines contain block IDs (no filtering needed). 15 templates from 10K sample; top 5 cover 95.7%. |
 
 ---
 
@@ -184,7 +190,7 @@ opsagent/
 ├── data/
 │   ├── baseline/                       # 24h OTel Demo normal operation data (metadata.json)
 │   ├── evaluation/results/             # Per-test JSON results + explanation_quality_scores.csv
-│   ├── RCAEval/re1/ · re2/ · re3/      # 375 + 270 + 90 labeled RCA cases (~4GB total)
+│   ├── RCAEval/re1/ · re2/ · re3/      # 375 + 271 + 90 labeled RCA cases (~4GB total)
 │   └── LogHub/HDFS/                    # HDFS.log + anomaly_label.csv (~1GB)
 │
 ├── src/

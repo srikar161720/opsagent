@@ -46,14 +46,14 @@
 - [x] Create `scripts/generate_training_data.py` and start 24h OTel Demo baseline collection
 
 ### Dataset Acquisition & EDA (Week 3)
-- [x] Create `scripts/download_datasets.py` (with `--rcaeval`, `--loghub`, `--all` flags)
-- [ ] Download RCAEval RE1 (375 cases), RE2 (270 cases), RE3 (90 cases) to `data/RCAEval/`
-- [ ] Download LogHub HDFS to `data/LogHub/HDFS/` (verify `HDFS.log` + `anomaly_label.csv` present)
-- [ ] Create `notebooks/01_data_exploration.ipynb` — OTel Demo log volume, metric availability, error rates
-- [ ] Create `notebooks/02_rcaeval_exploration.ipynb` — fault distributions, root cause service breakdown, metric naming across RE1/RE2/RE3
-- [ ] Create `notebooks/03_loghub_exploration.ipynb` — block structure, anomaly rate (~2.9%), Drain3 sample quality
-- [ ] Visualize OTel Demo service topology (`docs/images/service_topology.html`)
-- [ ] Confirm 24h OTel Demo baseline collection complete (`data/baseline/metadata.json` status = `completed`)
+- [x] Create `scripts/download_datasets.py` (with `--rcaeval`, `--loghub`, `--all`, `--status` flags; downloads from Zenodo API)
+- [x] Download RCAEval RE1 (375 cases), RE2 (271 cases), RE3 (90 cases) to `data/RCAEval/`
+- [x] Download LogHub HDFS to `data/LogHub/HDFS/` (verify `HDFS.log` + `anomaly_label.csv` present)
+- [x] Create `notebooks/01_data_exploration.ipynb` — OTel Demo metric availability, time series, distributions, correlations, anomalous period detection
+- [x] Create `notebooks/02_rcaeval_exploration.ipynb` — fault distributions, root cause service breakdown, metric column naming across RE1/RE2/RE3
+- [x] Create `notebooks/03_loghub_exploration.ipynb` — block structure, anomaly rate (~2.9%), Drain3 sample quality, normal vs anomalous comparison
+- [x] Visualize OTel Demo service topology (`docs/images/service_topology.html`) — interactive vis.js graph with 7 nodes, 9 edges
+- [x] Confirm 24h OTel Demo baseline collection complete (`data/baseline/metadata.json` status = `completed`, 1440 snapshots)
 - [ ] Advisor check-in completed (Week 3) — demo running stack + downloaded datasets
 
 ### ✅ Phase 2 Complete When:
@@ -166,7 +166,7 @@
 ### RCAEval Cross-System Evaluation (Week 10, Days 1–2)
 - [ ] Create `tests/evaluation/rcaeval_evaluation.py` — `evaluate_on_rcaeval()` + `run_all_rcaeval_variants()`
 - [ ] Run OpsAgent against RE1 (375 cases); save results
-- [ ] Run OpsAgent against RE2 (270 cases); save results
+- [ ] Run OpsAgent against RE2 (271 cases); save results
 - [ ] Run OpsAgent against RE3 (90 cases); save results
 - [ ] Compare results against published baselines (BARO, CIRCA, RCD, CausalRCA, MicroHECL)
 
@@ -198,7 +198,7 @@
 
 ### ✅ Phase 5 Complete When:
 - 40 OTel Demo fault injection tests complete; Recall@1 ≥ 80%
-- All 735 RCAEval cases evaluated; results vs. published baselines computed
+- All 736 RCAEval cases evaluated; results vs. published baselines computed
 - All required metrics calculated; Visualizations 1–9 created
 - `docs/evaluation_results.md` drafted
 - *(Nice-to-have: HDFS AD Benchmark tasks completed if time allows)*
@@ -403,3 +403,96 @@
 - `fs_usage_bytes` reports 6 entries instead of 7 — some containers don't report blkio stats. This is expected and doesn't affect downstream processing.
 - Log collection (Promtail/Loki) intentionally deferred — the log training pipeline (LSTM-AE) uses Kafka → Drain3 → template sequences, not Loki baseline logs. Promtail can be added later if needed for the agent's `search_logs` tool.
 - Python stdout buffering in Docker was fixed by adding `PYTHONUNBUFFERED=1` to the exporter's Dockerfile.
+
+---
+
+### 2026-03-27 — Session 4
+
+**Phase:** Phase 2 — Data Understanding (Week 3 Dataset Acquisition & EDA)
+**Duration:** ~3 hours
+
+**Completed:**
+- Confirmed second 24h OTel Demo baseline collection completed successfully (1440 snapshots, 8 metrics × 7 services, all non-empty, `status: completed`)
+- Added `seaborn` dependency via Poetry (v0.13.2) for EDA notebook visualizations
+- Rewrote `scripts/download_datasets.py` — replaced broken `RCAEval.utility` imports with direct Zenodo API downloads; added automated LogHub HDFS download; improved verification with true case counting via `inject_time.txt`; added per-system breakdown in `--status` output
+- Downloaded and verified all RCAEval datasets: RE1 (375 cases across RE1-OB/SS/TT), RE2 (271 cases across RE2-OB/SS/TT), RE3 (90 cases across RE3-OB/SS/TT) — total 736 cases
+- Downloaded and verified LogHub HDFS: `HDFS.log` (1505 MB, 11M+ lines), `anomaly_label.csv` (575,061 blocks)
+- Created `notebooks/01_data_exploration.ipynb` — OTel Demo baseline EDA with 8 cells: data loading, statistical summary, time series plots (8 metrics × 7 services), distribution boxplots, correlation heatmap, anomalous period detection (rolling 3σ), service comparison bar charts, summary
+- Created `notebooks/02_rcaeval_exploration.ipynb` — RCAEval EDA with 8 cells: case inventory builder, directory structure samples, fault type distribution charts, root cause service breakdown, metric column naming analysis across OB/SS/TT, data format comparison table, adapter design summary
+- Created `notebooks/03_loghub_exploration.ipynb` — LogHub HDFS EDA with 9 cells: anomaly label analysis (rate verification), 100K-line log sample loading with parsing, block structure analysis, log pattern analysis (levels, components), Drain3 template extraction test (10K messages, depth=4, sim_th=0.4), template frequency distribution, normal vs anomalous block comparison, summary
+- Created `docs/images/service_topology.html` — interactive vis.js topology visualization with 7 nodes (frontend, cartservice, checkoutservice, paymentservice, productcatalogservice, currencyservice, redis), 9 directed edges, color-coded by tier (gateway/backend/data store), hierarchical layout, legend
+- Updated `PROGRESS.md` — marked all Phase 2 Week 3 tasks complete (except advisor check-in)
+
+**In Progress:**
+- None — all Phase 2 implementation tasks complete; only advisor check-in remains
+
+**Blockers / Issues:**
+- **RCAEval pip package is a stub:** The installed `RCAEval` PyPI package only contains a single `is_ok()` function. The `RCAEval.utility` module with download functions does not exist in the pip package — it only exists in the GitHub source. **Resolution:** Rewrote `download_datasets.py` to download directly from Zenodo API (`https://zenodo.org/api/records/14590730/files/{name}/content`) without depending on `RCAEval.utility`.
+- **RE2 case count discrepancy:** RE2-OB has 91 cases instead of the documented 90, making the RE2 total 271 instead of 270. This is a minor data issue in the upstream RCAEval benchmark — no impact on our evaluation pipeline.
+- **RE1 vs RE2/RE3 file format differences:** RE1 uses `data.csv` with simple `{service}_{metric}` column naming (51 columns). RE2/RE3 use `metrics.csv` with container-level metric naming (up to 418 columns). The Phase 3 `RCAEvalDataAdapter` must handle both formats.
+
+**Next Session:**
+- Begin Phase 3 — Data Preparation: implement OTel Demo data pipeline (`kafka_consumer.py`, `log_parser.py`, `windowing.py`, `feature_engineering.py`)
+- Implement `rcaeval_adapter.py` and `loghub_preprocessor.py`
+- Run notebooks 01-03 to validate EDA outputs
+
+**Notes:**
+- Notebooks were created in Session 4 and executed + validated in Session 5 — all outputs confirmed correct.
+- RCAEval service naming differs across systems: OB uses `adservice`, `cartservice`, etc.; SS uses `carts`, `catalogue`, `orders`, etc.; TT uses `ts-auth-service`, `ts-order-service`, etc. The adapter must normalize these.
+- LogHub HDFS has 575,061 blocks total in `anomaly_label.csv`, with expected ~2.9% anomaly rate.
+- The topology visualization uses vis.js loaded from CDN — no Python dependency added. Edge direction follows the convention from `context/data_pipeline_specs.md`: A → B means "A is called by B" (A is a dependency of B).
+- `seaborn` added as a main dependency (not dev-only) since it's used in notebooks that are part of the project deliverables.
+
+---
+
+### 2026-03-29 — Session 5
+
+**Phase:** Phase 2 — Data Understanding (Week 3 Notebook Validation & Data Quality Review)
+**Duration:** ~3 hours
+
+**Completed:**
+- Corrected RE2 case count (270→271) and total (735→736) across all project files: `CLAUDE.md`, `PROGRESS.md`, `README.md`, `configs/dataset_config.yaml`, `docs/problem_statement.md`, `docs/baselines.md`, `docs/success_metrics.md`, `context/architecture_and_design.md`, `context/evaluation_strategy.md`, `context/config_reference.md`, `context/data_pipeline_specs.md`
+- Fixed outdated `RCAEval.utility` references in `context/data_pipeline_specs.md` — replaced with Zenodo API download instructions matching the actual `scripts/download_datasets.py` implementation
+- Updated `context/data_pipeline_specs.md` §6.2 with accurate RCAEval directory structure, file format differences, and all three naming conventions
+- Diagnosed Redis missing from notebook 01 output — traced to `SERVICES` list in `generate_training_data.py` (lines 29-36) not including `"redis"`, even though the PromQL filter and actual snapshot data contained Redis metrics
+- Fixed `scripts/generate_training_data.py` — added `"redis"` to `SERVICES` list
+- Fixed `data/baseline/metadata.json` — added `"redis"` to services array (now reports 7 services)
+- Validated notebook 01 (OTel Demo baseline EDA) — all outputs verified:
+  - 1440 snapshots, 79,152 rows, 7 services × 8 metrics, full 24h coverage with no gaps
+  - 16 zero-variance pairs identified (14 network error rates + 2 fs_usage_bytes) — safe to drop
+  - `memory_usage_bytes` and `memory_working_set_bytes` perfectly correlated (r=1.0) across all 7 services — drop one
+  - Cross-service correlations confirmed real topology: `redis↔cartservice` network (r=0.939), `frontend↔paymentservice` TX (r=0.987)
+  - No anomalous periods detected via 3σ rolling window — very stable baseline
+  - Redis is the highest CPU consumer (mean 5.1e-3); frontend is the heaviest memory user (~200MB)
+  - `checkoutservice` has 24 missing memory snapshots (1416 vs 1440) — minor container restart, not a concern
+- Validated notebook 02 (RCAEval exploration) — all outputs verified:
+  - 736 total cases confirmed: RE1=375, RE2=271, RE3=90
+  - RE2 extra case traced to `checkoutservice_cpu` in OB having 4 runs instead of 3
+  - Discovered RE1 format inconsistency: RE1-OB uses simple naming (51 cols), but RE1-SS (439 cols) and RE1-TT (1246 cols) use container-metric naming — same format as RE2/RE3
+  - Infrastructure noise identified in column names: GKE node names, AWS IPs, `istio-init` — adapter must filter these
+  - Updated `context/data_pipeline_specs.md` to document three naming conventions (not two)
+- Validated notebook 03 (LogHub HDFS exploration) — all outputs verified:
+  - 575,061 blocks, 2.93% anomaly rate — matches expected ~2.9%
+  - 0 parse failures on 100K lines; 100% of lines contain block IDs (no filtering needed)
+  - 100% INFO log level — anomaly detection must rely on template sequence patterns, not log levels
+  - 15 Drain3 templates from 10K sample; top 5 cover 95.7%, top 10 cover 100%; 5 singletons
+  - Anomalous blocks have fewer logs (mean 9.7 vs 12.7) with wider variance — incomplete lifecycle patterns
+  - Drain3 parameters (`depth=4`, `sim_th=0.4`, `max_children=100`) validated as producing reasonable output
+
+**In Progress:**
+- None — all notebook validation complete
+
+**Blockers / Issues:**
+- **Redis missing from `SERVICES` metadata list:** `generate_training_data.py` included `redis` in the PromQL filter (`_SVC_FILTER`) but not in the `SERVICES` list used for `metadata.json`. The Docker Stats Exporter correctly exposed Redis metrics, Prometheus scraped them, and they were present in all 1440 snapshots — only the metadata was wrong. **Resolution:** Added `"redis"` to both the `SERVICES` list and `metadata.json`.
+- **RCAEval RE1 format inconsistency:** The context files stated "RE1 uses `data.csv` with simple naming" — this is only true for RE1-OB (51 columns). RE1-SS (439 cols) and RE1-TT (1246 cols) use `data.csv` but with container-metric naming identical to RE2/RE3. **Resolution:** Updated `context/data_pipeline_specs.md` to document all three naming conventions. The `RCAEvalDataAdapter` must detect format by inspecting column names, not by variant alone.
+
+**Next Session:**
+- Begin Phase 3 — Data Preparation: implement OTel Demo data pipeline (`kafka_consumer.py`, `log_parser.py`, `windowing.py`, `feature_engineering.py`)
+- Implement `rcaeval_adapter.py` with three-format detection and infrastructure noise filtering
+- Implement `loghub_preprocessor.py` with streaming parser
+
+**Notes:**
+- All three EDA notebooks have been executed and validated — outputs confirm data quality is good across all three datasets with no blocking issues.
+- The 24h OTel Demo baseline data does not need re-collection — Redis metrics were already present in snapshot files; only the metadata label was missing.
+- Key design decisions confirmed by EDA: (1) drop `memory_usage_bytes` (redundant with `memory_working_set_bytes`), (2) drop zero-variance network error rate features, (3) per-service anomaly thresholds are necessary due to high variance differences across services, (4) Drain3 parameters validated on HDFS data.
+- RE1 adapter cannot assume simple naming based on variant — must inspect column name patterns to detect format.

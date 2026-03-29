@@ -761,45 +761,66 @@ def create_otel_splits(baseline_windows: List, val_ratio: float = 0.20) -> dict:
 | Variant | Modalities | Fault Types | Cases | Notes |
 |---|---|---|---|---|
 | **RE1** | Metrics only | CPU, MEM, DISK, DELAY, LOSS | 375 | No logs/traces; metrics-only evaluation |
-| **RE2** | Metrics + Logs + Traces | CPU, MEM, DISK, DELAY, LOSS, SOCKET | 270 | Multi-modal; primary cross-system track |
+| **RE2** | Metrics + Logs + Traces | CPU, MEM, DISK, DELAY, LOSS, SOCKET | 271 | Multi-modal; primary cross-system track (RE2-OB has 91 cases) |
 | **RE3** | Metrics + Logs + Traces | 5 code-level faults | 90 | Fine-grained code-level fault analysis |
 
-**Total:** 735 labeled failure cases across 3 independent microservice systems
+**Total:** 736 labeled failure cases across 3 independent microservice systems (Online Boutique, Sock Shop, Train Ticket)
 
 ### 6.2 Case Directory Structure
 
+> **Note:** The actual directory structure differs from the original RCAEval documentation. Each variant contains system subdirectories (e.g., `RE1-OB/`, `RE2-SS/`), and cases are organized as `{service}_{fault_type}/{run_number}/`.
+
 ```
-data/RCAEval/<variant>/<case_id>/
-├── metrics.csv      # Time-series metrics; columns = <service>_<metric_type>
-├── logs.csv         # Timestamped log lines per service (RE2, RE3 only)
-├── traces.csv       # Span-level trace data (RE2, RE3 only)
-└── metadata.json    # Ground truth: root_cause_service, fault_type, anomaly_timestamp
+data/RCAEval/re1/
+├── RE1-OB/                         # Online Boutique system
+│   ├── adservice_cpu/
+│   │   ├── 1/
+│   │   │   ├── data.csv            # RE1-OB uses simple naming: 51 cols, {service}_{metric}
+│   │   │   └── inject_time.txt     # Unix timestamp of fault injection
+│   │   ├── 2/ ...
+│   │   └── 5/
+│   ├── adservice_delay/ ...
+│   └── ...
+├── RE1-SS/                         # Sock Shop — data.csv but container-metric naming (439 cols)
+└── RE1-TT/                         # Train Ticket — data.csv but container-metric naming (1246 cols)
+
+data/RCAEval/re2/
+├── RE2-OB/
+│   ├── checkoutservice_cpu/
+│   │   ├── 1/
+│   │   │   ├── metrics.csv         # RE2/RE3 use metrics.csv, container-level naming (421-1574 cols)
+│   │   │   ├── logs.csv
+│   │   │   ├── traces.csv
+│   │   │   ├── inject_time.txt
+│   │   │   ├── simple_metrics.csv
+│   │   │   └── cluster_info.json
+│   │   └── ...
+│   └── ...
+├── RE2-SS/
+└── RE2-TT/
 ```
 
-**Example `metadata.json`:**
-```json
-{
-  "root_cause_service": "cartservice",
-  "root_cause_indicator": "cpu",
-  "fault_type": "cpu",
-  "anomaly_timestamp": "2023-11-15T14:32:05Z"
-}
-```
+**Key file format differences (three naming conventions, not two):**
+- **RE1-OB only:** `data.csv` with simple `{service}_{metric}` columns (e.g., `adservice_cpu`, `cartservice_mem`) — 51 columns, 5 metric types (cpu, mem, load, latency, error)
+- **RE1-SS, RE1-TT:** `data.csv` but with container-metric naming (e.g., `carts_container-cpu-system-seconds-total`) — 439-1246 columns, same format as RE2/RE3
+- **All RE2/RE3:** `metrics.csv` with `{service}_{container-metric-name}` columns — 389-1574 columns, 50 metric types
+- **Service naming varies by system:** OB: `adservice`, `cartservice`; SS: `carts`, `catalogue`, `orders`; TT: `ts-auth-service`, `ts-order-service`
+- **Infrastructure noise in columns:** GKE node names (`gke-gke-cluster-*`), AWS IPs (`ip-192-168-*`), and `istio-init` appear as service prefixes — the adapter must filter these out
 
 ### 6.3 Installation & Download
 
+> **Important:** The pip-installed `RCAEval` package is a stub — it only contains `is_ok()`. The `RCAEval.utility` module does not exist in the pip package. Download datasets directly from Zenodo.
+
 ```bash
-poetry add --group dev "RCAEval[default]"
-```
+# Download all datasets from Zenodo API
+poetry run python scripts/download_datasets.py --all
 
-```python
-# scripts/download_datasets.py
-from RCAEval.utility import download_re1_dataset, download_re2_dataset, download_re3_dataset
+# Or download individually
+poetry run python scripts/download_datasets.py --rcaeval
+poetry run python scripts/download_datasets.py --loghub
 
-# Downloads ~5 GB total to data/RCAEval/re1/, re2/, re3/
-download_re1_dataset()
-download_re2_dataset()
-download_re3_dataset()
+# Check download status
+poetry run python scripts/download_datasets.py --status
 ```
 
 ### 6.4 `RCAEvalDataAdapter` Full Class
@@ -1470,47 +1491,21 @@ Slow internal processing: CPU saturation, inefficient queries, GC pauses, I/O wa
 
 ## 10. Dataset Download Script
 
-```python
-# scripts/download_datasets.py
-"""One-time dataset download script. Run once during Phase 2 setup."""
+> **Important:** The pip-installed `RCAEval` package is a stub — `RCAEval.utility` does not exist. The implemented `scripts/download_datasets.py` downloads directly from the Zenodo API.
 
-from pathlib import Path
+```bash
+# Download all datasets from Zenodo
+poetry run python scripts/download_datasets.py --all
 
-def download_rcaeval():
-    """Download RCAEval RE1, RE2, RE3 (~5 GB total)."""
-    from RCAEval.utility import download_re1_dataset, download_re2_dataset, download_re3_dataset
-    print("Downloading RCAEval datasets (~5 GB)...")
-    download_re1_dataset()   # → data/RCAEval/re1/
-    download_re2_dataset()   # → data/RCAEval/re2/
-    download_re3_dataset()   # → data/RCAEval/re3/
-    print("RCAEval download complete.")
+# Download individually
+poetry run python scripts/download_datasets.py --rcaeval   # RE1/RE2/RE3 from Zenodo record 14590730
+poetry run python scripts/download_datasets.py --loghub    # HDFS_v1.zip from Zenodo record 8196385
 
-
-def download_loghub_hdfs():
-    """
-    Download LogHub HDFS dataset (~1 GB).
-
-    Manual download from: https://zenodo.org/record/8196385
-    Files needed: HDFS.log, anomaly_label.csv
-    Place in: data/LogHub/HDFS/
-    """
-    hdfs_dir = Path("data/LogHub/HDFS/")
-    hdfs_dir.mkdir(parents=True, exist_ok=True)
-
-    if (hdfs_dir / "HDFS.log").exists():
-        print("LogHub HDFS already present — skipping.")
-        return
-
-    print("LogHub HDFS requires manual download.")
-    print("1. Visit: https://zenodo.org/record/8196385")
-    print("2. Download: HDFS.log and anomaly_label.csv")
-    print(f"3. Place files in: {hdfs_dir.resolve()}")
-
-
-if __name__ == "__main__":
-    download_rcaeval()
-    download_loghub_hdfs()
+# Check download status
+poetry run python scripts/download_datasets.py --status
 ```
+
+The script downloads 9 ZIP files for RCAEval (3 systems × 3 variants) and `HDFS_v1.zip` for LogHub, extracts them to the correct directories, and verifies case counts.
 
 **Expected disk usage:**
 

@@ -178,11 +178,11 @@ Three complementary sources, each with a non-overlapping role:
 │                     │                       │                             │
 │  LogHub (HDFS)      │  OpenTelemetry Demo   │  RCAEval (RE1 / RE2 / RE3)  │
 │  • 11M+ logs        │  • 24h baseline data  │  • RE1: 375 cases (metrics) │
-│  • Block-level      │  • 8 fault types      │  • RE2: 270 cases (multi-   │
+│  • Block-level      │  • 8 fault types      │  • RE2: 271 cases (multi-   │
 │    anomaly labels   │  • 5 runs each        │    modal: metrics+logs)     │
 │  • ~1GB on disk     │  • 40 test cases      │  • RE3: 90 cases (code-     │
 │                     │  • Known ground truth │    level faults)            │
-│  Purpose:           │                       │  • 735 total labeled cases  │
+│  Purpose:           │                       │  • 736 total labeled cases  │
 │  Transfer learning  │  Purpose:             │                             │
 │  for LSTM-AE;       │  Controlled exps.     │  Purpose:                   │
 │  benchmark vs.      │  with known fault     │  Real-world generalization; │
@@ -211,7 +211,7 @@ Every significant choice is recorded here with the rationale, so the same ground
 | **LLM** | Gemini 1.5 Flash | Claude API, GPT-4 | Google AI Studio Tier 1 is cost-effective (free up to generous limits); Flash is fast enough for investigation |
 | **Agent framework** | LangGraph | Raw LangChain, AutoGen, CrewAI | Explicit state machine gives full control over agent flow; prevents uncontrolled looping; easier to debug |
 | **Vector database** | ChromaDB | Pinecone, Weaviate, Qdrant | Local deployment — zero API costs; sufficient for ~10 runbook documents |
-| **Cross-system validation dataset** | RCAEval (RE1/RE2/RE3) | AIOps Challenge, GAIA Dataset | Purpose-built for microservice RCA; 735 labeled cases; MIT license; 5 published baselines for direct quantitative comparison; covers three real microservice systems |
+| **Cross-system validation dataset** | RCAEval (RE1/RE2/RE3) | AIOps Challenge, GAIA Dataset | Purpose-built for microservice RCA; 736 labeled cases; MIT license; 5 published baselines for direct quantitative comparison; covers three real microservice systems |
 | **Log pretraining dataset** | LogHub HDFS | Thunderbird (211M logs), BGL (4.7M logs), Spirit | Manageable size (~1GB uncompressed); block-level anomaly labels directly usable for supervised benchmarking; best-documented in LogHub collection |
 | **Excluded datasets** | AIOps Challenge, GAIA | — | AIOps Challenge focuses on single-node KPI anomaly detection, not causal RCA across services; GAIA has fewer labeled cases; both create scope creep beyond what the timeline supports |
 | **Fault injection method** | Scripted bash (docker stop, tc, env vars) | Chaos Mesh, Chaos Monkey | Chaos Mesh requires Kubernetes; scripted injection gives reproducible, deterministic faults with known ground truth |
@@ -227,10 +227,10 @@ Every significant choice is recorded here with the rationale, so the same ground
 |---|---|
 | **CRISP-DM methodology** | Full 6-phase implementation: Business Understanding → Data Understanding → Data Preparation → Modeling → Evaluation → Deployment |
 | **DS&A Principles** | Unsupervised learning (LSTM-AE), causal inference (PC algorithm), multi-step agent reasoning (LangGraph), information retrieval (ChromaDB RAG) |
-| **Data collection & visualization** | Self-generates data via fault injection; real-world data from RCAEval (735 cases) and LogHub (11M+ logs); 10+ visualization types in `notebooks/08` |
+| **Data collection & visualization** | Self-generates data via fault injection; real-world data from RCAEval (736 cases) and LogHub (11M+ logs); 10+ visualization types in `notebooks/08` |
 | **Task identification** | Anomaly detection, causal discovery, NLG (RCA report), information retrieval, classification (Recall@1/3) |
 | **Solution design & implementation** | End-to-end system: streaming pipeline + ML models + agent orchestration + REST API + dashboard |
-| **Analysis & evaluation** | Fault injection testing (40 cases), RCAEval cross-validation (735 cases), 3 internal baselines + 5 published baselines, statistical analysis with confidence intervals |
+| **Analysis & evaluation** | Fault injection testing (40 cases), RCAEval cross-validation (736 cases), 3 internal baselines + 5 published baselines, statistical analysis with confidence intervals |
 | **Model interpretability** | Agent produces evidence chains + causal DAG + counterfactual confidence scores in every RCA report |
 
 ---
@@ -247,7 +247,7 @@ Every significant choice is recorded here with the rationale, so the same ground
 
 **Serving (2):** FastAPI (`POST /investigate`, `GET /health`, `GET /topology`), Streamlit dashboard
 
-**Evaluation (4):** Fault injection suite (8 types × 5 runs), RCAEval evaluation runner (735 cases), 3 internal baselines, metrics calculator
+**Evaluation (4):** Fault injection suite (8 types × 5 runs), RCAEval evaluation runner (736 cases), 3 internal baselines, metrics calculator
 
 **Total MVP effort estimate: 185–235 hours**
 
