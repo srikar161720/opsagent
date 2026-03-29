@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpsAgent — OTel Demo Service Topology</title>
+    <script src="https://unpkg.com/vis-network@9.1.6/standalone/umd/vis-network.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+        }
+        #header {
+            padding: 20px 30px;
+            background: #16213e;
+            border-bottom: 1px solid #334;
+        }
+        #header h1 { font-size: 22px; font-weight: 600; }
+        #header p { font-size: 13px; color: #8899aa; margin-top: 4px; }
+        #network {
+            width: 100%;
+            height: calc(100vh - 140px);
+        }
+        #legend {
+            display: flex;
+            gap: 24px;
+            padding: 12px 30px;
+            background: #16213e;
+            border-top: 1px solid #334;
+            font-size: 13px;
+            align-items: center;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .legend-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .legend-arrow {
+            color: #8899aa;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <h1>OTel Demo — Service Topology</h1>
+        <p>Directed edges show dependency flow: A → B means "A is a dependency of B" (B calls A). Upstream services are potential root causes when downstream services degrade.</p>
+    </div>
+    <div id="network"></div>
+    <div id="legend">
+        <div class="legend-item"><span class="legend-dot" style="background:#4ecca3;"></span> Gateway</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#6c9bdb;"></span> Backend Service</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#e07c4f;"></span> Data Store</div>
+        <span class="legend-arrow">│</span>
+        <div class="legend-item"><span class="legend-arrow">A → B</span> = A is called by B</div>
+    </div>
+
+    <script>
+        const nodes = new vis.DataSet([
+            { id: "frontend",              label: "frontend",              color: { background: "#4ecca3", border: "#3ba882", highlight: { background: "#6ff5c4", border: "#4ecca3" } }, font: { color: "#1a1a2e", size: 14, face: "sans-serif", bold: { color: "#1a1a2e" } }, shape: "box", margin: 12, level: 0 },
+            { id: "cartservice",           label: "cartservice",           color: { background: "#6c9bdb", border: "#5080b8", highlight: { background: "#95bfef", border: "#6c9bdb" } }, font: { color: "#1a1a2e", size: 14, face: "sans-serif" }, shape: "box", margin: 12, level: 1 },
+            { id: "checkoutservice",       label: "checkoutservice",       color: { background: "#6c9bdb", border: "#5080b8", highlight: { background: "#95bfef", border: "#6c9bdb" } }, font: { color: "#1a1a2e", size: 14, face: "sans-serif" }, shape: "box", margin: 12, level: 1 },
+            { id: "productcatalogservice", label: "productcatalogservice", color: { background: "#6c9bdb", border: "#5080b8", highlight: { background: "#95bfef", border: "#6c9bdb" } }, font: { color: "#1a1a2e", size: 14, face: "sans-serif" }, shape: "box", margin: 12, level: 2 },
+            { id: "paymentservice",        label: "paymentservice",        color: { background: "#6c9bdb", border: "#5080b8", highlight: { background: "#95bfef", border: "#6c9bdb" } }, font: { color: "#1a1a2e", size: 14, face: "sans-serif" }, shape: "box", margin: 12, level: 2 },
+            { id: "currencyservice",       label: "currencyservice",       color: { background: "#6c9bdb", border: "#5080b8", highlight: { background: "#95bfef", border: "#6c9bdb" } }, font: { color: "#1a1a2e", size: 14, face: "sans-serif" }, shape: "box", margin: 12, level: 2 },
+            { id: "redis",                 label: "redis",                 color: { background: "#e07c4f", border: "#c0603a", highlight: { background: "#f09f70", border: "#e07c4f" } }, font: { color: "#1a1a2e", size: 14, face: "sans-serif" }, shape: "box", margin: 12, level: 3 },
+        ]);
+
+        // Edges: dependency → dependent (A → B means "A is called by B")
+        const edges = new vis.DataSet([
+            { from: "redis",                 to: "cartservice",           arrows: "to", color: { color: "#556", highlight: "#8af" }, width: 2 },
+            { from: "cartservice",           to: "frontend",              arrows: "to", color: { color: "#556", highlight: "#8af" }, width: 2 },
+            { from: "cartservice",           to: "checkoutservice",       arrows: "to", color: { color: "#556", highlight: "#8af" }, width: 2 },
+            { from: "checkoutservice",       to: "frontend",              arrows: "to", color: { color: "#556", highlight: "#8af" }, width: 2 },
+            { from: "productcatalogservice", to: "frontend",              arrows: "to", color: { color: "#556", highlight: "#8af" }, width: 2 },
+            { from: "productcatalogservice", to: "checkoutservice",       arrows: "to", color: { color: "#556", highlight: "#8af" }, width: 2 },
+            { from: "paymentservice",        to: "checkoutservice",       arrows: "to", color: { color: "#556", highlight: "#8af" }, width: 2 },
+            { from: "currencyservice",       to: "frontend",              arrows: "to", color: { color: "#556", highlight: "#8af" }, width: 2 },
+            { from: "currencyservice",       to: "checkoutservice",       arrows: "to", color: { color: "#556", highlight: "#8af" }, width: 2 },
+        ]);
+
+        const container = document.getElementById("network");
+        const data = { nodes, edges };
+        const options = {
+            layout: {
+                hierarchical: {
+                    direction: "DU",
+                    sortMethod: "directed",
+                    levelSeparation: 120,
+                    nodeSpacing: 180,
+                },
+            },
+            physics: false,
+            interaction: {
+                hover: true,
+                tooltipDelay: 100,
+            },
+            edges: {
+                smooth: { type: "cubicBezier", roundness: 0.4 },
+                arrows: { to: { scaleFactor: 0.8 } },
+            },
+        };
+
+        new vis.Network(container, data, options);
+    </script>
+</body>
+</html>
