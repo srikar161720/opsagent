@@ -20,7 +20,7 @@ Three complementary data sources serve non-overlapping purposes:
 |---------|------|------|
 | **OpenTelemetry Demo** (self-generated) | 24h baseline + 40 fault tests | Primary training data and controlled evaluation with known ground truth |
 | **LogHub HDFS** (Zenodo DOI: 10.5281/zenodo.8196385) | 11M+ logs, block-level labels | LSTM-AE pretraining; Drain3 template validation; benchmark vs. DeepLog/LogRobust |
-| **RCAEval** RE1/RE2/RE3 (Zenodo DOI: 10.5281/zenodo.14590730) | 735 labeled failure cases | Cross-system RCA validation; comparison against 5 published baselines |
+| **RCAEval** RE1/RE2/RE3 (Zenodo DOI: 10.5281/zenodo.14590730) | 736 labeled failure cases | Cross-system RCA validation; comparison against 5 published baselines |
 
 ## Quick Start
 
