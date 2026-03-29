@@ -33,6 +33,7 @@ SERVICES = [
     "paymentservice",
     "productcatalogservice",
     "currencyservice",
+    "redis",
 ]
 
 # Service name filter — matches OTel Demo containers by service label
