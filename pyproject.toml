@@ -49,6 +49,8 @@ langchain-core = ">=0.2"
 fastapi = ">=0.104"
 uvicorn = {version = ">=0.24", extras = ["standard"]}
 streamlit = ">=1.29"
+seaborn = "^0.13.2"
+matplotlib = "^3.10.8"
 
 [tool.poetry.group.dev.dependencies]
 ruff = ">=0.3"
