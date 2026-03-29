@@ -44,7 +44,7 @@ These baselines are evaluated on the same 40 OTel Demo fault injection test case
 
 ## Published Baselines (RCAEval Cross-System Evaluation)
 
-These baselines are evaluated on the RCAEval benchmark (735 labeled cases across RE1/RE2/RE3). Published results are taken from the RCAEval paper (ACM WWW 2025 / IEEE/ACM ASE 2024).
+These baselines are evaluated on the RCAEval benchmark (736 labeled cases across RE1/RE2/RE3). Published results are taken from the RCAEval paper (ACM WWW 2025 / IEEE/ACM ASE 2024).
 
 ### 4. BARO
 
@@ -82,5 +82,5 @@ These baselines are evaluated on the RCAEval benchmark (735 labeled cases across
 |-----------------|-------------|--------|
 | OTel Demo (40 cases) | Rule-Based, AD-Only, LLM-Without-Tools | Recall@1, Recall@3, Precision, Detection Latency, MTTR Proxy |
 | RCAEval RE1 (375 cases) | BARO, CIRCA, RCD, CausalRCA, MicroHECL | Recall@1 |
-| RCAEval RE2 (270 cases) | BARO, CIRCA, RCD, CausalRCA, MicroHECL | Recall@1 (primary cross-system target) |
+| RCAEval RE2 (271 cases) | BARO, CIRCA, RCD, CausalRCA, MicroHECL | Recall@1 (primary cross-system target) |
 | RCAEval RE3 (90 cases) | BARO, CIRCA, RCD, CausalRCA, MicroHECL | Recall@1 |

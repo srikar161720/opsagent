@@ -35,7 +35,7 @@ OpsAgent's evaluation and training leverage three complementary data sources:
 
 2. **LogHub HDFS (Zenodo DOI: 10.5281/zenodo.8196385):** 11M+ log lines with block-level anomaly labels. Used for LSTM-Autoencoder pretraining via transfer learning, enabling the model to learn general log anomaly patterns before specializing on the target environment.
 
-3. **RCAEval RE1/RE2/RE3 (Zenodo DOI: 10.5281/zenodo.14590730):** 735 labeled failure cases across three real-world microservice systems. Used for cross-system validation against 5 published baselines (BARO, CIRCA, RCD, CausalRCA, MicroHECL), demonstrating generalization beyond the training environment.
+3. **RCAEval RE1/RE2/RE3 (Zenodo DOI: 10.5281/zenodo.14590730):** 736 labeled failure cases across three real-world microservice systems. Used for cross-system validation against 5 published baselines (BARO, CIRCA, RCD, CausalRCA, MicroHECL), demonstrating generalization beyond the training environment.
 
 ## Target Users
 

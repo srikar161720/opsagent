@@ -27,11 +27,11 @@ OpsAgent is evaluated across two primary tracks and one optional benchmark. Each
 
 Scoring procedure: Manually evaluate 25-30 RCA reports selected across all 8 fault types. Scores are logged to `data/evaluation/explanation_quality_scores.csv`.
 
-## Cross-System Validation — RCAEval (735 Cases)
+## Cross-System Validation — RCAEval (736 Cases)
 
 | Metric | Target | Dataset | Definition |
 |--------|--------|---------|------------|
-| **Recall@1 (RE2)** | Competitive with CIRCA / RCD | RE2 (270 cases, multi-modal) | OpsAgent's top prediction accuracy compared against 5 published baselines |
+| **Recall@1 (RE2)** | Competitive with CIRCA / RCD | RE2 (271 cases, multi-modal) | OpsAgent's top prediction accuracy compared against 5 published baselines |
 | **Recall@1 (RE1)** | Reported | RE1 (375 cases, metrics-only) | Baseline comparison on metrics-only data |
 | **Recall@1 (RE3)** | Reported | RE3 (90 cases, code-level faults) | Generalization to code-level fault types |
 
