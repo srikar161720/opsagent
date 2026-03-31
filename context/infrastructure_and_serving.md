@@ -867,11 +867,12 @@ def health_check():
     except Exception:
         components["loki"] = "unreachable"
 
-    # Kafka (attempt metadata fetch)
+    # Kafka (attempt metadata fetch via confluent-kafka)
     try:
-        from kafka import KafkaAdminClient
-        admin = KafkaAdminClient(bootstrap_servers="localhost:9092", request_timeout_ms=2000)
-        admin.close()
+        from confluent_kafka.admin import AdminClient
+        admin = AdminClient({"bootstrap.servers": "localhost:9092"})
+        # list_topics() with a short timeout to verify connectivity
+        admin.list_topics(timeout=2)
         components["kafka"] = "connected"
     except Exception:
         components["kafka"] = "unreachable"

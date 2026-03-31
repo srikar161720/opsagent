@@ -63,9 +63,12 @@ services:
 
 ```python
 # src/data_collection/kafka_consumer.py
-from kafka import KafkaConsumer
+from confluent_kafka import Consumer, KafkaException
 from typing import Iterator, Dict, Any
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class LogConsumer:
@@ -77,15 +80,14 @@ class LogConsumer:
         topic: str = "opsagent-logs",
         group_id: str = "opsagent-consumer",
     ):
-        self.consumer = KafkaConsumer(
-            topic,
-            bootstrap_servers=bootstrap_servers,
-            group_id=group_id,
-            auto_offset_reset="earliest",         # Start from beginning if no committed offset
-            enable_auto_commit=True,
-            auto_commit_interval_ms=1000,
-            value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-        )
+        self.topic = topic
+        self.consumer = Consumer({
+            "bootstrap.servers": bootstrap_servers,
+            "group.id": group_id,
+            "auto.offset.reset": "earliest",
+            "enable.auto.commit": True,
+        })
+        self.consumer.subscribe([topic])
 
     def consume(self) -> Iterator[Dict[str, Any]]:
         """
@@ -97,20 +99,42 @@ class LogConsumer:
             offset:     int   — Message offset within partition
             value:      dict  — Deserialized log payload:
                                 {timestamp, service, level, message, trace_id}
+
+        Uses confluent-kafka Consumer.poll() API. Each call to poll() returns
+        a single Message object (or None on timeout). The message's .error()
+        must be checked before accessing .value().
         """
-        for message in self.consumer:
+        while True:
+            msg = self.consumer.poll(1.0)
+
+            if msg is None:
+                continue
+            if msg.error():
+                logger.warning("Consumer error: %s", msg.error())
+                continue
+
+            try:
+                value = json.loads(msg.value().decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                logger.warning("Failed to decode message at offset %d: %s", msg.offset(), e)
+                continue
+
+            # msg.timestamp() returns (timestamp_type, timestamp_ms) tuple
+            _, timestamp_ms = msg.timestamp()
+
             yield {
-                "timestamp": message.timestamp,
-                "partition": message.partition,
-                "offset": message.offset,
-                "value": message.value,
+                "timestamp": timestamp_ms,
+                "partition": msg.partition(),
+                "offset": msg.offset(),
+                "value": value,
             }
 
     def close(self):
+        """Commit final offsets and close the consumer."""
         self.consumer.close()
 ```
 
-> **Note:** `kafka-python` is the Python client (managed via `pyproject.toml`). The OTel Demo services must be configured to emit logs to this Kafka topic — a Kafka log appender is wired in as part of the Docker Compose setup.
+> **Note:** `confluent-kafka` is the Python client (managed via `pyproject.toml` as `confluent-kafka>=2.3`). It wraps `librdkafka` for high-performance consumption. The API differs significantly from `kafka-python`: use `Consumer(config_dict)` instead of `KafkaConsumer(topic, **kwargs)`, and `consumer.poll(timeout)` instead of iterating directly. The OTel Demo services must be configured to emit logs to this Kafka topic — a Kafka log appender is wired in as part of the Docker Compose setup.
 
 ---
 
@@ -219,10 +243,15 @@ class LogParser:
             `for tid in range(num_templates)` loop.
 
         Note:
-            Unlike parse(), this method calls TemplateMiner.match() (read-only),
-            which does NOT create new templates or update Drain3's internal state.
+            Uses Drain.tree_search() internally (read-only lookup). The
+            TemplateMiner.match() method requires Drain3 >=0.9.8, but our
+            installed version (0.9.1) does not have it. tree_search() is the
+            underlying read-only mechanism that match() wraps in newer versions.
         """
-        cluster = self.template_miner.match(log_line)
+        tokens = log_line.strip().split()
+        cluster = self.template_miner.drain.tree_search(
+            self.template_miner.drain.root_node, tokens
+        )
         if cluster is None:
             return -1, "UNKNOWN"
 
@@ -828,7 +857,6 @@ poetry run python scripts/download_datasets.py --status
 ```python
 # src/preprocessing/rcaeval_adapter.py
 from __future__ import annotations
-import json
 import pandas as pd
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
@@ -840,14 +868,13 @@ class RCAEvalDataAdapter:
 
     Output format per case:
         {
-            "case_id":           str,
-            "metrics":           dict[str, pd.DataFrame],  # service_name → per-service metrics DataFrame
-            "logs":              pd.DataFrame | None,       # None for RE1
-            "anomaly_timestamp": str,                       # ISO-8601; from metadata.json
+            "case_id":           str,                       # e.g. "RE2-OB/checkoutservice_cpu/1"
+            "metrics":           dict[str, pd.DataFrame],   # service_name → per-service metrics DataFrame
+            "logs":              pd.DataFrame | None,        # None for RE1
+            "anomaly_timestamp": str,                        # ISO-8601; from inject_time.txt (Unix epoch)
             "ground_truth": {
-                "root_cause_service":   str,
-                "root_cause_indicator": str,
-                "fault_type":           str,
+                "root_cause_service":   str,                 # parsed from directory name
+                "fault_type":           str,                  # parsed from directory name
             }
         }
     """
@@ -871,12 +898,36 @@ class RCAEvalDataAdapter:
     # ── Public API ───────────────────────────────────────────────────────
 
     def list_cases(self) -> List[str]:
-        """Return sorted list of all valid case IDs (dirs containing metadata.json)."""
+        """
+        Return sorted list of all valid case IDs.
+
+        Walks three directory levels under dataset_path:
+          1. System dirs: RE1-OB/, RE1-SS/, RE1-TT/ (or RE2-*, RE3-*)
+          2. Fault dirs:  {service}_{fault_type}/ (e.g. checkoutservice_cpu/)
+          3. Run dirs:    1/, 2/, 3/, ... (each containing data files)
+
+        A valid case directory must contain inject_time.txt and either
+        metrics.csv or data.csv.
+
+        Case ID format: "{system}/{service_fault}/{run}" e.g. "RE2-OB/checkoutservice_cpu/1"
+        """
         if self._case_ids is None:
-            self._case_ids = sorted(
-                d.name for d in self.dataset_path.iterdir()
-                if d.is_dir() and (d / "metadata.json").exists()
-            )
+            cases: List[str] = []
+            for system_dir in sorted(self.dataset_path.iterdir()):
+                if not system_dir.is_dir():
+                    continue
+                for fault_dir in sorted(system_dir.iterdir()):
+                    if not fault_dir.is_dir():
+                        continue
+                    for run_dir in sorted(fault_dir.iterdir(), key=lambda p: p.name):
+                        if not run_dir.is_dir():
+                            continue
+                        has_data = (run_dir / "metrics.csv").exists() or (run_dir / "data.csv").exists()
+                        has_inject = (run_dir / "inject_time.txt").exists()
+                        if has_data and has_inject:
+                            case_id = f"{system_dir.name}/{fault_dir.name}/{run_dir.name}"
+                            cases.append(case_id)
+            self._case_ids = cases
         return self._case_ids
 
     def load_case(self, case_id: str) -> dict:
@@ -884,7 +935,7 @@ class RCAEvalDataAdapter:
         Load and convert a single failure case to OpsAgent input format.
 
         Args:
-            case_id: Directory name of the case (e.g. "cpu_cartservice_001").
+            case_id: Hierarchical case ID, e.g. "RE2-OB/checkoutservice_cpu/1".
 
         Returns:
             OpsAgent-compatible investigation input dict. `metrics` is returned as a
@@ -894,12 +945,7 @@ class RCAEvalDataAdapter:
         metrics_flat = self._load_metrics(case_dir)
         logs = self._load_logs(case_dir)
         ground_truth = self._load_ground_truth(case_dir)
-        # Use anomaly_timestamp from metadata.json as primary source;
-        # fall back to inferring from the last row of metrics.csv if absent.
-        anomaly_timestamp = (
-            ground_truth.pop("anomaly_timestamp")
-            or self._extract_anomaly_timestamp(metrics_flat)
-        )
+        anomaly_timestamp = self._load_inject_timestamp(case_dir)
 
         return {
             "case_id":           case_id,
@@ -920,8 +966,18 @@ class RCAEvalDataAdapter:
     # ── Internal helpers ─────────────────────────────────────────────────
 
     def _load_metrics(self, case_dir: Path) -> pd.DataFrame:
-        """Load metrics.csv and normalize column names to OpsAgent conventions."""
-        df = pd.read_csv(case_dir / "metrics.csv")
+        """
+        Load metrics file and normalize column names.
+
+        Tries metrics.csv first (RE2/RE3), falls back to data.csv (RE1).
+        """
+        metrics_file = case_dir / "metrics.csv"
+        if not metrics_file.exists():
+            metrics_file = case_dir / "data.csv"
+        df = pd.read_csv(metrics_file)
+        # Filter out infrastructure noise columns
+        noise_prefixes = ("gke-", "ip-192-168-", "istio-init")
+        df = df[[c for c in df.columns if not any(c.startswith(p) for p in noise_prefixes)]]
         df.columns = [self._normalize_metric_col(c) for c in df.columns]
         return df
 
@@ -934,26 +990,41 @@ class RCAEvalDataAdapter:
 
     def _load_ground_truth(self, case_dir: Path) -> dict:
         """
-        Parse metadata.json to extract ground truth labels and anomaly timestamp.
+        Parse ground truth from the directory path structure.
 
-        Returns a dict that includes `anomaly_timestamp` so load_case() can use
-        the authoritative value from metadata.json before falling back to inference.
-        load_case() pops `anomaly_timestamp` before including this dict in the output.
+        The fault directory name has the format {service}_{fault_type},
+        e.g. "checkoutservice_cpu" → service="checkoutservice", fault_type="cpu".
+        The injected service IS the root cause service (by RCAEval design).
         """
-        with open(case_dir / "metadata.json") as f:
-            meta = json.load(f)
+        # case_dir is e.g. .../RE2-OB/checkoutservice_cpu/1
+        fault_dir_name = case_dir.parent.name  # "checkoutservice_cpu"
+        # Split on last underscore to handle services with underscores (e.g. "ts-auth-service")
+        # Fault types are: cpu, mem, disk, delay, loss, socket (single words)
+        last_underscore = fault_dir_name.rfind("_")
+        if last_underscore > 0:
+            service = fault_dir_name[:last_underscore]
+            fault_type = fault_dir_name[last_underscore + 1:]
+        else:
+            service = fault_dir_name
+            fault_type = "unknown"
+
         return {
-            "root_cause_service":   meta.get("root_cause_service", "unknown"),
-            "root_cause_indicator": meta.get("root_cause_indicator", "unknown"),
-            "fault_type":           meta.get("fault_type", "unknown"),
-            "anomaly_timestamp":    meta.get("anomaly_timestamp", None),   # popped by load_case()
+            "root_cause_service": service,
+            "fault_type":         fault_type,
         }
 
-    def _extract_anomaly_timestamp(self, metrics_df: pd.DataFrame) -> str:
-        """Infer anomaly timestamp from the last timestamp row in metrics.csv."""
-        if "timestamp" in metrics_df.columns:
-            return str(metrics_df["timestamp"].max())
-        return metrics_df.index[-1].isoformat() if hasattr(metrics_df.index, "isoformat") else ""
+    def _load_inject_timestamp(self, case_dir: Path) -> str:
+        """
+        Load the fault injection timestamp from inject_time.txt.
+
+        The file contains a single Unix epoch integer (seconds since 1970).
+        Returns an ISO-8601 formatted UTC timestamp string.
+        """
+        from datetime import datetime, timezone
+        inject_file = case_dir / "inject_time.txt"
+        timestamp_unix = int(inject_file.read_text().strip())
+        dt = datetime.fromtimestamp(timestamp_unix, tz=timezone.utc)
+        return dt.isoformat()
 
     def _split_metrics_by_service(self, metrics_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         """
@@ -1011,11 +1082,13 @@ class RCAEvalDataAdapter:
 ```python
 from src.preprocessing.rcaeval_adapter import RCAEvalDataAdapter
 
+# Expected counts: RE1=375, RE2=271, RE3=90
 for variant in ["re1", "re2", "re3"]:
     adapter = RCAEvalDataAdapter(f"data/RCAEval/{variant}/")
     cases = adapter.list_cases()
     first = adapter.load_case(cases[0])
     print(f"{variant.upper()}: {len(cases)} cases")
+    print(f"  First case: {cases[0]}")
     print(f"  Services with metrics: {list(first['metrics'].keys())}")
     print(f"  Logs: {'present' if first['logs'] is not None else 'None (expected for RE1)'}")
     print(f"  Ground truth: {first['ground_truth']}")
@@ -1155,10 +1228,10 @@ for variant in ["re1", "re2"]:
 **Per-case result JSON template:**
 ```json
 {
-  "case_id": "cpu_cartservice_001",
+  "case_id": "RE2-OB/checkoutservice_cpu/1",
   "dataset": "re2",
   "fault_type": "cpu",
-  "ground_truth": "cartservice",
+  "ground_truth": "checkoutservice",
   "predicted_root_cause": "cartservice",
   "top_3_predictions": ["cartservice", "frontend", "checkoutservice"],
   "confidence": 0.83,

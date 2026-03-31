@@ -69,13 +69,13 @@
 **Goal:** Build OTel Demo data pipeline, implement dataset adapters, feature engineering, runbook indexing.
 
 ### OTel Demo Pipeline (Week 4)
-- [ ] `src/data_collection/kafka_consumer.py` — `LogConsumer` class
-- [ ] `src/preprocessing/log_parser.py` — `LogParser` wrapping Drain3 `TemplateMiner`
-- [ ] `src/preprocessing/windowing.py` — `WindowAggregator` (60s windows)
-- [ ] `src/preprocessing/feature_engineering.py` — `FeatureEngineer` (log template counts + metric stats)
-- [ ] `src/preprocessing/rcaeval_adapter.py` — `RCAEvalDataAdapter` with column normalization; smoke-tested against RE1/RE2/RE3
-- [ ] `src/data_collection/metrics_collector.py` — Prometheus query client
-- [ ] `notebooks/04_log_parsing_analysis.ipynb` — Drain3 template quality across OTel Demo + HDFS samples
+- [x] `src/data_collection/kafka_consumer.py` — `LogConsumer` class
+- [x] `src/preprocessing/log_parser.py` — `LogParser` wrapping Drain3 `TemplateMiner`
+- [x] `src/preprocessing/windowing.py` — `WindowAggregator` (60s windows)
+- [x] `src/preprocessing/feature_engineering.py` — `FeatureEngineer` (log template counts + metric stats)
+- [x] `src/preprocessing/rcaeval_adapter.py` — `RCAEvalDataAdapter` with column normalization; smoke-tested against RE1/RE2/RE3
+- [x] `src/data_collection/metrics_collector.py` — Prometheus query client
+- [x] `notebooks/04_log_parsing_analysis.ipynb` — Drain3 template quality across HDFS 100K sample (OTel Demo logs deferred — no log shipper configured yet)
 
 ### LogHub Preprocessor & Supporting Components (Week 5)
 - [ ] `src/preprocessing/loghub_preprocessor.py` — `LogHubHDFSPreprocessor`: block grouping, label loading, sequence building; validated (~2.9% anomaly rate)
@@ -496,3 +496,57 @@
 - The 24h OTel Demo baseline data does not need re-collection — Redis metrics were already present in snapshot files; only the metadata label was missing.
 - Key design decisions confirmed by EDA: (1) drop `memory_usage_bytes` (redundant with `memory_working_set_bytes`), (2) drop zero-variance network error rate features, (3) per-service anomaly thresholds are necessary due to high variance differences across services, (4) Drain3 parameters validated on HDFS data.
 - RE1 adapter cannot assume simple naming based on variant — must inspect column name patterns to detect format.
+
+---
+
+### 2026-03-29 — Session 6
+
+**Phase:** Phase 3 — Data Preparation (Week 4 OTel Demo Pipeline)
+**Duration:** ~4 hours
+
+**Completed:**
+- Fixed 8 discrepancies in `context/data_pipeline_specs.md`:
+  1. Kafka library: rewrote LogConsumer from `kafka-python` to `confluent-kafka` API (`Consumer.poll()`, `msg.error()`, `msg.value().decode()`)
+  2. RCAEval `metadata.json` assumption: replaced with `inject_time.txt` parsing (no metadata.json exists in dataset)
+  3. RCAEval directory traversal: updated from 1-level to 3-level walk (system → fault → run)
+  4. RCAEval case ID format: changed from `"cpu_cartservice_001"` to `"RE2-OB/checkoutservice_cpu/1"`
+  5. RCAEval timestamp source: reads from `inject_time.txt` (Unix epoch) instead of metadata.json
+  6. `_load_metrics()`: tries `metrics.csv` first, falls back to `data.csv` for RE1
+  7. Ground truth extraction: parses service and fault_type from directory name (split on last underscore)
+  8. Drain3 `match()` API: replaced `TemplateMiner.match()` (requires Drain3 >=0.9.8) with `Drain.tree_search()` (available in installed v0.9.1)
+- Created `src/preprocessing/log_parser.py` — `LogParser` class wrapping Drain3 with `parse()` (mutating), `match()` (read-only via `tree_search`), bidirectional template_to_id/id_to_template mappings, monotonically increasing integer IDs, `FilePersistence`
+- Created `src/data_collection/kafka_consumer.py` — `LogConsumer` class using `confluent_kafka.Consumer` with poll loop, JSON decoding, timestamp tuple unpacking, error handling
+- Created `src/data_collection/metrics_collector.py` — `MetricsCollector` class with `instant_query()`, `range_query()`, `get_service_metrics()` against Prometheus HTTP API
+- Created `src/preprocessing/windowing.py` — `WindowAggregator` class with 60s non-overlapping windows, `add_log()` returns completed window on boundary crossing, `add_metric()`, `flush()` for partial windows
+- Created `src/preprocessing/feature_engineering.py` — `FeatureEngineer` class: log template counts + normalized freq + error ratio + unique count (num_templates × 2 + 2) combined with metric stats (mean/std/min/max/p50/p99/delta = 7 per metric), `build_sequence()` for LSTM-AE input, `reset()` for batch use
+- Created `src/preprocessing/rcaeval_adapter.py` — `RCAEvalDataAdapter` class with 3-level directory traversal, 3-format detection (RE1-OB simple, RE1-SS/TT container-metric, RE2/RE3 container-metric), infrastructure noise filtering (`gke-*`, `ip-192-168-*`, `istio-init`), ground truth from directory names, timestamps from `inject_time.txt`
+- Created `notebooks/04_log_parsing_analysis.ipynb` — executed and validated: 100K HDFS lines → 45 templates, growth curve converges by line ~92K, top 5 templates cover 98.3%, sensitivity analysis confirms sim_th=0.4 is optimal (15 templates at 0.4 vs 642 at 0.6)
+- Created `tests/conftest.py` — 6 shared fixtures: `sample_hdfs_log_lines`, `sample_otel_log_lines`, `sample_window_dict`, `empty_window_dict`, `mock_kafka_message`, `mock_prometheus_response`
+- Created `tests/unit/test_log_parser.py` — 12 tests: parse tuple return, first ID=0, monotonic IDs, template generalization, num_templates growth, match known/unknown, match doesn't create templates, get_template reverse lookup, persistence, HDFS log parsing
+- Created `tests/unit/test_feature_engineering.py` — 13 tests: feature_dim formula, no-metrics/no-templates edge cases, output shape, template counts/freq, empty window, metric features (mean/min/max), error ratio with/without parser, build_sequence shape/ValueError, reset clears delta
+- Smoke-tested RCAEval adapter: RE1=375, RE2=271, RE3=90 cases — all counts match expected totals
+- All 25 unit tests passing; ruff lint clean; mypy 0 errors on all new source files
+
+**In Progress:**
+- None — all Week 4 tasks complete
+
+**Blockers / Issues:**
+- **Drain3 v0.9.1 lacks `TemplateMiner.match()` method:** The spec and Context7 docs reference `match()` but it was added in v0.9.8. Our installed version (0.9.1) only has `add_log_message()`. **Resolution:** Used `Drain.tree_search(root_node, tokens)` as an equivalent read-only lookup. This is the underlying mechanism that `match()` wraps in newer versions. Updated spec to document this.
+- **`confluent-kafka` vs `kafka-python` API mismatch:** The spec used `kafka-python` imports (`from kafka import KafkaConsumer`) but `pyproject.toml` installs `confluent-kafka>=2.3`. These are entirely different libraries with incompatible APIs. **Resolution:** Rewrote LogConsumer using `confluent_kafka.Consumer` with `poll()` loop, `msg.error()` checking, and `msg.value().decode()` byte handling. Updated spec accordingly.
+- **RCAEval has no `metadata.json` files:** The spec assumed each case directory contains `metadata.json` with ground truth and timestamps. No such files exist in the downloaded dataset. **Resolution:** Ground truth is parsed from directory names (`{service}_{fault_type}`) and timestamps from `inject_time.txt` (Unix epoch). Rewrote the entire adapter with 3-level directory traversal.
+- **RE1-OB simple format detection failed initially:** The `_is_simple_format()` function checked for hyphens in column names, but RE1-OB has `frontend-external_load` and `frontend-external_error` (hyphens in service names). **Resolution:** Changed detection to check whether the metric suffix after the last underscore is a known simple metric (cpu, mem, load, latency, error) rather than checking for absence of hyphens.
+- **mypy type errors in 3 files:** `windowing.py` had `None + timedelta` potential; `kafka_consumer.py` had `bytes | None` decode issue; `metrics_collector.py` had untyped return from `resp.json()`. **Resolution:** Added `assert` guard for window_start, null check for message value, and explicit type annotation for Prometheus response.
+
+**Next Session:**
+- Begin Phase 3 Week 5: `loghub_preprocessor.py`, `topology_extractor.py`, `runbook_indexer.py`, `embeddings.py`
+- Create 5 runbooks in `runbooks/`
+- Create `scripts/prepare_data_splits.py`
+- Index runbooks into ChromaDB
+
+**Notes:**
+- Notebook 04 focuses on HDFS logs only — OTel Demo log parsing cannot be demonstrated until a log shipper (Promtail → Kafka) is configured. The 24h baseline collected metrics only; logs require separate infrastructure (Kafka topic ingestion from OTel services). This does not block Phase 3 Week 5 or the LSTM-AE pretraining (which uses HDFS, not OTel logs).
+- The 24h baseline metric data does NOT need re-collection. Log data was never part of the baseline collection — logs enter the system via real-time Kafka streaming during fine-tuning (Phase 4), not from stored baseline files.
+- Drain3 on 100K HDFS lines: 45 templates (vs 15 from 10K in notebook 03). The difference is from rare event templates (exceptions, deletions, replication). Core lifecycle templates (top 5 = 98.3% coverage) are the same. Template vocabulary converges by ~92K lines.
+- Drain3 sensitivity analysis: sim_th=0.4 sits in the "safe zone" (15 templates). At 0.6 templates explode to 642 (40x increase). This validates the chosen parameter.
+- RCAEval RE1-OB has 14 services in metrics (includes `main` and `frontend-external`), while RE2/RE3-OB have 13. This is inherent to the upstream dataset, not a bug.
+- Context7 was used to verify up-to-date APIs for confluent-kafka, Drain3, and ChromaDB before implementation.
