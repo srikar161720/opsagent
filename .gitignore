@@ -19,6 +19,7 @@ build/
 # Data and models (large files)
 data/
 models/*.pt
+models/drain3/
 
 # IDE
 .vscode/
