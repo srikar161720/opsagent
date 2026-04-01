@@ -33,7 +33,11 @@ prometheus-client = ">=0.19"
 
 # Vector DB and embeddings
 chromadb = ">=0.4"
-sentence-transformers = ">=2.2"
+# sentence-transformers 5.x pulls transformers 5.x which requires PyTorch >=2.4.
+# Pin both to 4.x/3.x for Intel Mac compatibility (torch <2.3).
+# On Apple Silicon or Linux with torch >=2.4, relax these to ">=2.2" / remove upper bound.
+sentence-transformers = ">=2.2,<4.0"
+transformers = ">=4.36,<5.0"
 # onnxruntime >=1.20 lacks macOS x86_64 wheels; pin for Intel Mac compatibility
 onnxruntime = ">=1.17,<1.20"
 
