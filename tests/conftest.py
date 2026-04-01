@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -127,3 +128,86 @@ def mock_prometheus_response():
         return {"status": status, "data": {"resultType": "vector", "result": result}}
 
     return _make
+
+
+# ── HDFS synthetic data ────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def hdfs_data_dir(tmp_path: Path) -> Path:
+    """Synthetic HDFS data directory with small HDFS.log + anomaly_label.csv.
+
+    Creates 4 blocks:
+      - blk_1000, blk_2000, blk_3000: Normal (multiple log lines each)
+      - blk_9999: Anomalous (short block, will be left-padded)
+    """
+    # Synthetic HDFS.log (header + message format)
+    # Helper to build HDFS-format log lines
+    hdr = "081109 203615 148 INFO"
+
+    def _recv(blk: str, ip: str) -> str:
+        return (
+            f"{hdr} dfs.DataNode$PacketResponder:"
+            f" Receiving block {blk} src: /{ip}:50010"
+            f" dest: /{ip}:50010"
+        )
+
+    def _done(blk: str, ip: str) -> str:
+        return (
+            f"{hdr} dfs.DataNode$PacketResponder:"
+            f" Received block {blk} of size 67108864"
+            f" from /{ip}"
+        )
+
+    def _add(blk: str, ip: str) -> str:
+        return (
+            f"{hdr} dfs.FSNamesystem:"
+            f" BLOCK* NameSystem.addStoredBlock:"
+            f" blockMap updated: {ip}:50010"
+            f" is added to {blk} size 67108864"
+        )
+
+    def _term(blk: str) -> str:
+        return (
+            f"{hdr} dfs.DataNode$PacketResponder:"
+            f" PacketResponder 1 for block {blk}"
+            " terminating"
+        )
+
+    def _verify(blk: str) -> str:
+        return (
+            f"{hdr} dfs.DataNode$PacketResponder:"
+            f" Verification succeeded for {blk}"
+        )
+
+    log_lines = [
+        _recv("blk_1000", "10.0.0.1"),
+        _done("blk_1000", "10.0.0.1"),
+        _add("blk_1000", "10.0.0.1"),
+        _term("blk_1000"),
+        _verify("blk_1000"),
+        _recv("blk_2000", "10.0.0.2"),
+        _done("blk_2000", "10.0.0.2"),
+        _add("blk_2000", "10.0.0.2"),
+        _term("blk_2000"),
+        _recv("blk_3000", "10.0.0.3"),
+        _done("blk_3000", "10.0.0.3"),
+        _add("blk_3000", "10.0.0.3"),
+        _term("blk_3000"),
+        _verify("blk_3000"),
+        _recv("blk_9999", "10.0.0.9"),
+        _done("blk_9999", "10.0.0.9"),
+    ]
+    (tmp_path / "HDFS.log").write_text("\n".join(log_lines) + "\n")
+
+    # Anomaly labels: blk_9999 is anomalous, others are normal
+    label_lines = [
+        "BlockId,Label",
+        "blk_1000,Normal",
+        "blk_2000,Normal",
+        "blk_3000,Normal",
+        "blk_9999,Anomaly",
+    ]
+    (tmp_path / "anomaly_label.csv").write_text("\n".join(label_lines) + "\n")
+
+    return tmp_path
