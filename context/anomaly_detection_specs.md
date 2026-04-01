@@ -85,7 +85,7 @@ template_id, template_str = parser.parse(clean_line)
 
 > **Why `-1` for unknown templates:** Template IDs start at 0 (`_next_id = 0`), so returning 0 for unknowns would silently misattribute unknown logs to the first real template. `-1` is naturally excluded by `FeatureEngineer`'s `for tid in range(num_templates)` loop, correctly contributing zero signal to the feature vector.
 
-**Gotcha:** `num_templates` is the `input_dim` for `LSTMAutoencoder`. It grows as new templates are seen and is finalized only after parsing the entire training corpus. Do not create the model until after all training data has been parsed. Expected range: **50–200 unique templates** for OTel Demo; **20–50 unique templates** for HDFS (its log format is much simpler).
+**Gotcha:** `num_templates` is the `input_dim` for `LSTMAutoencoder`. It grows as new templates are seen and is finalized only after parsing the entire training corpus. Do not create the model until after all training data has been parsed. Expected range: **50–200 unique templates** for OTel Demo; **~115 unique templates** for HDFS (confirmed from full 11.2M line parse — higher than the 20–50 estimate from 100K sample due to rare event templates).
 
 ---
 
@@ -265,7 +265,7 @@ HDFS has ~11M log lines — far more data than 24h of OTel Demo baseline. Pretra
 ### The `_load_compatible_weights()` Function — Critical Implementation Detail
 
 The HDFS and OTel Demo datasets will almost certainly have **different `input_dim`** values because:
-- HDFS `input_dim` = `num_templates` from HDFS parsing (~20–50)
+- HDFS `input_dim` = `num_templates` from HDFS parsing (~115 on full corpus)
 - OTel Demo `input_dim` = full `feature_dim` from `FeatureEngineer` (~150–450; see §3 formula)
 
 When dimensions differ, PyTorch's `load_state_dict()` throws `RuntimeError`. The fix: load only the LSTM encoder/decoder weights (which are dimension-agnostic once the embedding layer maps to `hidden_dim=64`) and reinitialize the embedding and output layers with the new `input_dim`.
@@ -537,7 +537,7 @@ class AnomalyDetector:
 | Total log lines | ~11.2 million |
 | Block labeling unit | `blk_<id>` — each line belongs to one or more blocks |
 | Block anomaly rate | ~2.9% (blocks marked "Anomaly" in labels file) |
-| Expected templates | 20–50 unique Drain3 templates (HDFS log format is very structured) |
+| Expected templates | ~115 unique Drain3 templates on full corpus (originally estimated 20–50 from 100K sample) |
 | Sequence length | 10 template IDs per block-window (matches OTel Demo `seq_len`) |
 
 ### Block-to-Sequence Logic
@@ -571,7 +571,7 @@ anomalous = preprocessor.get_anomalous_sequences()
 print(f"Normal sequences:    {normal.shape}")      # expected: (~540k, 10)
 print(f"Anomalous sequences: {anomalous.shape}")   # expected: (~16k, 10)
 print(f"Anomaly rate: {len(anomalous)/(len(normal)+len(anomalous)):.1%}")  # ~2.9%
-print(f"Unique templates:    {preprocessor.num_templates}")   # expected: 20-50
+print(f"Unique templates:    {preprocessor.num_templates}")   # expected: ~115
 ```
 
 ---
@@ -741,7 +741,7 @@ print("Stage 2 (Pretrained):", stage2)
 |---|---|---|
 | `LogParser` instance not shared | Template IDs inconsistent between HDFS pretraining and OTel fine-tuning | Pass the same `parser` object to both `LogHubHDFSPreprocessor` and the main pipeline |
 | Model created before corpus parse complete | `input_dim` too small; `KeyError` on template IDs above the initial dim | Always call `preprocessor.parse()` first, then `preprocessor.num_templates` → `LSTMAutoencoder(input_dim=...)` |
-| `RuntimeError` on `load_state_dict` | Input dim mismatch between HDFS (~20–50) and OTel (~150–450) | This is expected and handled by `_load_compatible_weights()` — not a bug |
+| `RuntimeError` on `load_state_dict` | Input dim mismatch between HDFS (~115) and OTel (~150–450) | This is expected and handled by `_load_compatible_weights()` — not a bug |
 | LSTM dropout warning on single layer | PyTorch warns if `num_layers=1` and `dropout>0` | Use `num_layers=2` as configured; do not reduce layers |
 | Threshold too low | Too many false positives during normal operation | Use `percentile=95` not `percentile=50`; recalculate on fresh baseline data |
 | `model.eval()` forgotten at inference | Dropout active during inference → noisy reconstruction errors → unstable threshold | Always set `model.eval()` and wrap in `torch.no_grad()` during threshold calculation and inference |

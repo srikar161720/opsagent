@@ -78,13 +78,13 @@
 - [x] `notebooks/04_log_parsing_analysis.ipynb` — Drain3 template quality across HDFS 100K sample (OTel Demo logs deferred — no log shipper configured yet)
 
 ### LogHub Preprocessor & Supporting Components (Week 5)
-- [ ] `src/preprocessing/loghub_preprocessor.py` — `LogHubHDFSPreprocessor`: block grouping, label loading, sequence building; validated (~2.9% anomaly rate)
-- [ ] `src/data_collection/topology_extractor.py` — `TopologyGraph` (NetworkX DiGraph, 6 services + Redis = 7 total nodes, all edges)
-- [ ] `src/knowledge_base/runbook_indexer.py` — `RunbookIndexer` with ChromaDB + `all-MiniLM-L6-v2`
-- [ ] `src/knowledge_base/embeddings.py` — embedding utility functions (sentence-transformers `all-MiniLM-L6-v2` wrapper)
-- [ ] Create 5 runbooks: `connection_exhaustion.md`, `cascading_failure.md`, `memory_pressure.md`, `high_latency.md`, `general_troubleshooting.md`
-- [ ] Index all runbooks into ChromaDB; verify search returns relevant results
-- [ ] `scripts/prepare_data_splits.py` — CLI script that calls `create_otel_splits()` and `create_hdfs_splits()` (defined in `src/preprocessing/`; see `context/data_pipeline_specs.md` §5)
+- [x] `src/preprocessing/loghub_preprocessor.py` — `LogHubHDFSPreprocessor`: block grouping, label loading, sequence building; `create_hdfs_splits()` and `create_otel_splits()` helper functions
+- [x] `src/data_collection/topology_extractor.py` — `TopologyGraph` (NetworkX DiGraph, 7 nodes, 9 edges, `get_subgraph()`, `to_json()`)
+- [x] `src/knowledge_base/runbook_indexer.py` — `RunbookIndexer` with ChromaDB + `all-MiniLM-L6-v2` (`index_file()`, `index_directory()`, `search()`)
+- [x] `src/knowledge_base/embeddings.py` — embedding utility functions (sentence-transformers `all-MiniLM-L6-v2` wrapper with lazy singleton)
+- [x] Create 5 runbooks: `connection_exhaustion.md`, `cascading_failure.md`, `memory_pressure.md`, `high_latency.md`, `general_troubleshooting.md`
+- [x] Index all runbooks into ChromaDB; verify search returns relevant results (57 chunks indexed; 3/4 top-1 matches, 4/4 top-3 matches)
+- [x] `scripts/prepare_data_splits.py` — CLI script with `--hdfs`, `--otel`, `--all` flags; saves `train.npy`, `val.npy`, `metadata.json` to `data/splits/hdfs/`
 - [ ] Advisor check-in completed (Week 5) — logs flowing, templates extracted, adapters working
 
 ### ✅ Phase 3 Complete When:
@@ -101,17 +101,38 @@
 **Goal:** Pretrain LSTM-AE on HDFS, fine-tune on OTel Demo, implement causal discovery, build and test the LangGraph agent.
 
 ### LSTM-Autoencoder (Week 6)
-- [ ] `src/anomaly_detection/lstm_autoencoder.py` — `LSTMAutoencoder` class with `get_reconstruction_error()`
-- [ ] `src/anomaly_detection/trainer.py` — `AnomalyTrainer` with training loop and early stopping
-- [ ] `src/anomaly_detection/pretrain_on_loghub.py` — `pretrain_on_hdfs()` and `finetune_on_otel_demo()` with `_load_compatible_weights()`
-- [ ] `src/anomaly_detection/threshold.py` — 95th percentile threshold from baseline reconstruction errors
-- [ ] `src/anomaly_detection/isolation_forest.py` — Isolation Forest baseline (n_estimators=100, contamination=0.01)
-- [ ] `src/anomaly_detection/detector.py` — `AnomalyDetector` real-time detection service (Fast Loop → Slow Loop bridge: scores each window, fires alert to `AgentExecutor` when threshold exceeded)
-- [ ] Run pretraining on HDFS in `notebooks/05_anomaly_detection_dev.ipynb` (Colab Pro, GPU) — checkpoint saved to `models/lstm_autoencoder/pretrained_hdfs.pt`
-- [ ] Run fine-tuning on OTel Demo — checkpoint saved to `models/lstm_autoencoder/finetuned_otel.pt`
-- [ ] Plot and save training curves to `docs/images/`
+- [x] `src/anomaly_detection/lstm_autoencoder.py` — `LSTMAutoencoder(nn.Module)` with `forward()`, `get_reconstruction_error()` (encoder-decoder with latent bottleneck, 138K params)
+- [x] `src/anomaly_detection/trainer.py` — `AnomalyTrainer` with MSELoss, Adam optimizer, early stopping, best-model restoration
+- [x] `src/anomaly_detection/pretrain_on_loghub.py` — `pretrain_on_hdfs()`, `finetune_on_otel_demo()`, `_load_compatible_weights()`, `_one_hot_encode()`
+- [x] `src/anomaly_detection/threshold.py` — `calculate_threshold()` with 95th percentile from baseline reconstruction errors
+- [x] `src/anomaly_detection/isolation_forest.py` — `IsolationForestDetector` baseline (n_estimators=100, contamination=0.01, n_jobs=-1)
+- [x] `src/anomaly_detection/detector.py` — `AnomalyDetector` real-time detection service (Fast Loop → Slow Loop bridge: scores each window, fires alert callback when threshold exceeded)
+- [x] Run pretraining on HDFS in `notebooks/05_anomaly_detection_dev.ipynb` (Colab Pro, GPU) — checkpoint saved to `models/lstm_autoencoder/pretrained_hdfs.pt` (115 templates, 1.6M sequences, early stopped at epoch 36/50, val_loss=0.000011)
+- [ ] Run fine-tuning on OTel Demo — deferred to Week 6.5 (requires Promtail + log collection)
+- [x] Plot and save training curves to `docs/images/` (hdfs_pretraining_curves.png, hdfs_error_distribution.png)
+
+### Log Pipeline & Fine-tuning Data Collection (Week 6.5 — between Week 6 and Week 7)
+
+**Before collection (infrastructure setup):**
+- [ ] Add Promtail service to `docker-compose.yml` — ship OTel Demo container logs to Loki and/or Kafka topic `opsagent-logs`
+- [ ] Create `infrastructure/promtail/promtail-config.yml` — scrape Docker container logs, label by service name, forward to Loki + Kafka
+- [ ] Update `scripts/start_infrastructure.sh` and `scripts/stop_infrastructure.sh` to include Promtail
+- [ ] Restart Docker stack and verify logs flowing: Loki receiving log entries, Kafka topic `opsagent-logs` populated
+- [ ] Update `scripts/generate_training_data.py` to collect logs from Loki alongside Prometheus metrics (log entries per window)
+
+**24h data collection (run with `caffeinate -s`; Week 7 tasks can proceed in parallel):**
+- [ ] Run 24-hour baseline collection with both metrics AND logs — save to `data/baseline_with_logs/`
+
+**After collection completes:**
+- [ ] Process collected data through `FeatureEngineer.build_sequence()` to produce feature vectors for fine-tuning
+- [ ] Run fine-tuning on OTel Demo using `finetune_on_otel_demo()` — checkpoint saved to `models/lstm_autoencoder/finetuned_otel.pt`
+- [ ] Calculate anomaly detection threshold using `calculate_threshold()` on fine-tuned model with normal baseline feature vectors
+- [ ] Plot and save training curves (pretrain + fine-tune) to `docs/images/`
 
 ### Causal Discovery (Week 7)
+
+> **Note:** Week 7 tasks have no dependency on the Week 6.5 data collection and can be completed while the 24h log-enriched baseline collection is in progress.
+
 - [ ] `src/causal_discovery/pc_algorithm.py` — `discover_causal_graph()` wrapping causal-learn PC (α=0.05, Fisher's Z)
 - [ ] `src/causal_discovery/counterfactual.py` — `calculate_counterfactual_confidence()` scoring
 - [ ] `src/causal_discovery/graph_utils.py` — `CausalEdge` and `CausalGraph` dataclasses
@@ -133,9 +154,9 @@
 - [ ] Advisor check-in completed (Week 8) — show HDFS pretraining curves + working agent demo
 
 ### Unit Tests
-- [ ] `tests/unit/test_log_parser.py`
-- [ ] `tests/unit/test_feature_engineering.py`
-- [ ] `tests/unit/test_anomaly_detection.py`
+- [x] `tests/unit/test_log_parser.py` — 12 tests (completed Session 6)
+- [x] `tests/unit/test_feature_engineering.py` — 13 tests (completed Session 6)
+- [x] `tests/unit/test_anomaly_detection.py` — 22 tests: LSTMAutoencoder (5), AnomalyTrainer (4), Threshold (3), IsolationForest (3), AnomalyDetector (3), LoadCompatibleWeights (2), OneHotEncode (2)
 - [ ] `tests/unit/test_causal_discovery.py`
 - [ ] `tests/unit/test_agent_tools.py`
 - [ ] `tests/integration/test_data_pipeline.py`
@@ -550,3 +571,73 @@
 - Drain3 sensitivity analysis: sim_th=0.4 sits in the "safe zone" (15 templates). At 0.6 templates explode to 642 (40x increase). This validates the chosen parameter.
 - RCAEval RE1-OB has 14 services in metrics (includes `main` and `frontend-external`), while RE2/RE3-OB have 13. This is inherent to the upstream dataset, not a bug.
 - Context7 was used to verify up-to-date APIs for confluent-kafka, Drain3, and ChromaDB before implementation.
+
+---
+
+### 2026-04-01 — Session 7
+
+**Phase:** Phase 3 → Phase 4 — Data Preparation (Week 5 completion) + Modeling (Week 6 LSTM-Autoencoder)
+**Duration:** ~5 hours
+
+**Completed:**
+
+*Phase 3 Week 5 (carried from Session 6):*
+- Created `src/preprocessing/loghub_preprocessor.py` — `LogHubHDFSPreprocessor` class with streaming HDFS.log parsing, block ID grouping via regex, anomaly label loading, fixed-length sequence building (left-padded, chunked); `create_hdfs_splits()` and `create_otel_splits()` helper functions
+- Created `src/data_collection/topology_extractor.py` — `TopologyGraph` class with NetworkX DiGraph (7 nodes, 9 edges), `get_subgraph()` returning upstream/downstream dependencies with guard for unknown services, `to_json()` serialization
+- Created `src/knowledge_base/embeddings.py` — lazy-loaded singleton wrapper for sentence-transformers `all-MiniLM-L6-v2` with `embed_text()` and `embed_batch()` functions
+- Created `src/knowledge_base/runbook_indexer.py` — `RunbookIndexer` class with ChromaDB `PersistentClient`, paragraph-boundary chunking, MD5 document IDs, upsert-based indexing, similarity search with `1.0 - distance` relevance scoring
+- Created 5 runbook markdown files in `runbooks/`: `connection_exhaustion.md`, `cascading_failure.md`, `memory_pressure.md`, `high_latency.md`, `general_troubleshooting.md` — each 500+ words with Symptoms, Root Cause, Investigation Steps, Remediation, Prevention sections
+- Created `scripts/prepare_data_splits.py` — CLI script with `--hdfs`, `--otel`, `--all` flags
+- Pinned `transformers>=4.36,<5.0` and `sentence-transformers>=2.2,<4.0` in `pyproject.toml` to resolve Intel Mac compatibility (transformers 5.x requires PyTorch >=2.4); downgraded to transformers 4.57.6 and sentence-transformers 3.4.1
+- Indexed all 5 runbooks into ChromaDB — 57 chunks total; verified search: 3/4 top-1 matches, 4/4 top-3 matches
+- Added `hdfs_data_dir` fixture to `tests/conftest.py` (synthetic 4 blocks, 16 log lines)
+- Created 4 test files: `test_loghub_preprocessor.py` (15 tests), `test_topology_extractor.py` (10 tests), `test_embeddings.py` (5 tests), `test_runbook_indexer.py` (11 tests)
+- All 66 unit tests passing; ruff lint clean; mypy 0 errors
+
+*Phase 4 Week 6:*
+- Created `src/anomaly_detection/lstm_autoencoder.py` — `LSTMAutoencoder(nn.Module)` with encoder-decoder LSTM architecture, latent bottleneck (Linear→LSTM→Linear→Linear→LSTM→Linear), `forward()` and `get_reconstruction_error()` (MSE per sequence)
+- Created `src/anomaly_detection/trainer.py` — `AnomalyTrainer` with MSELoss, Adam optimizer, DataLoader-based training, early stopping with best-model in-memory restoration, device auto-detection
+- Created `src/anomaly_detection/pretrain_on_loghub.py` — `pretrain_on_hdfs()` (HDFS parsing → one-hot encode → train), `finetune_on_otel_demo()` (load pretrained → partial weight transfer → fine-tune with lower LR), `_load_compatible_weights()` (filters by key name and shape match, skips embedding/output_layer)
+- Created `src/anomaly_detection/threshold.py` — `calculate_threshold()` with batched inference under `no_grad()`, returns `np.percentile(errors, percentile)`
+- Created `src/anomaly_detection/isolation_forest.py` — `IsolationForestDetector` wrapping sklearn with `fit()`, `predict()`, `score_samples()`, `n_jobs=-1`
+- Created `src/anomaly_detection/detector.py` — `AnomalyDetector` Fast Loop → Slow Loop bridge with `score()` method, alert dict construction, callback invocation on threshold breach
+- Created `tests/unit/test_anomaly_detection.py` — 22 tests across 7 classes (LSTMAutoencoder, AnomalyTrainer, Threshold, IsolationForest, AnomalyDetector, LoadCompatibleWeights, OneHotEncode)
+- Created `notebooks/05_anomaly_detection_dev.ipynb` — 8-cell Colab GPU notebook (setup, HDFS load, pretrain, plot curves, threshold, HDFS benchmark, error distribution, fine-tune placeholder)
+- All 88 unit tests passing; ruff lint clean; mypy 0 errors on `src/anomaly_detection/`
+
+*Pretraining (run manually on Google Colab):*
+- Parsed full HDFS.log: 11.2M lines → 115 Drain3 templates, 575,061 blocks
+- Normal sequences: 1,608,443 (shape `(1608443, 10)`), anomalous: 42,785; sequence-level anomaly rate: 2.59%
+- One-hot encoded to shape `(1286754, 10, 115)` train / `(321689, 10, 115)` val
+- Training converged: loss 0.000444 → 0.000015 (epoch 1→36), val_loss best 0.000011 at epoch 31-32
+- Early stopped at epoch 36/50 (patience=5); model restored to best weights
+- Checkpoint saved: `models/lstm_autoencoder/pretrained_hdfs.pt` (138,243 parameters)
+- 95th percentile threshold on holdout normal data: 0.000003
+- HDFS benchmark: F1=0.58, Precision=0.60, Recall=0.56 (anomaly class) — moderate, expected for one-hot template-only features
+- Training curves and error distribution plots saved to `docs/images/`
+
+*PROGRESS.md updates:*
+- Added "Week 6.5 — Log Pipeline & Fine-tuning Data Collection" section between Week 6 and Week 7 with 10 tasks for Promtail, log collection, fine-tuning, and threshold calculation
+
+**In Progress:**
+- None — all Week 5 + Week 6 implementation tasks complete; pretraining done
+
+**Blockers / Issues:**
+- **`transformers` 5.x NameError on Intel Mac:** The installed `transformers` 5.3.0 references `nn.Module` in a function signature but only imports `torch.nn` when PyTorch >=2.4 is detected. With torch 2.2.2, importing `sentence_transformers` crashes. **Resolution:** Pinned `transformers>=4.36,<5.0` and `sentence-transformers>=2.2,<4.0` in `pyproject.toml`. Downgraded to transformers 4.57.6 and sentence-transformers 3.4.1. All imports and ChromaDB indexing now work.
+- **Drain3 v0.9.1 `load_state()` RuntimeError in tests:** `TemplateMiner.load_state()` iterates a dict while modifying it (Python 3.12 raises RuntimeError). Occurs when `LogParser()` loads existing state from `models/drain3/`. **Resolution:** Tests pass fresh `tmp_path`-based persistence paths to `LogParser` to avoid loading stale state.
+- **HDFS benchmark F1=0.58 (below 0.90 target):** The one-hot encoded template sequences are sparse — anomalous blocks often share the same templates as normal blocks in different order/frequency. This is the HDFS-only pretraining result; the primary evaluation (OTel Demo fault injection) uses richer combined log+metric feature vectors. The HDFS benchmark is a nice-to-have track (see PROGRESS.md Phase 5).
+- **HDFS full corpus produces 115 templates (vs 45 from 100K sample):** The full 11.2M lines expose rare event templates not seen in the 100K sample. Template vocabulary converges; 115 is the final count. This changes `input_dim` from the estimated 20-50 to 115, but the architecture handles dynamic `input_dim`.
+
+**Next Session:**
+- Begin Week 6.5: Add Promtail to `docker-compose.yml`, configure log shipping, collect 4-8h baseline with logs+metrics
+- Run fine-tuning on OTel Demo with collected feature vectors
+- Calculate production threshold on fine-tuned model
+- Begin Week 7: Causal discovery (`pc_algorithm.py`, `counterfactual.py`, `graph_utils.py`)
+
+**Notes:**
+- The trainer saves best model weights in memory (not to disk) and restores after training loop. The caller (`pretrain_on_hdfs`, `finetune_on_otel_demo`) handles `torch.save()` with wrapped format `{"model_state_dict": ..., "history": ...}`.
+- `_load_compatible_weights()` filters checkpoint keys by both name pattern and shape match — it loads ~8-12 LSTM encoder/decoder tensors while skipping embedding and output_layer (which depend on `input_dim` and differ between HDFS and OTel).
+- The `AnomalyDetector.score()` method returns the reconstruction error as a float and fires the `on_anomaly` callback only when error > threshold. The alert dict includes `anomaly_score`, `threshold`, `severity`, `timestamp`, and `affected_services`.
+- Ruff flagged `import torch.nn.functional as F` as N812 (CamelCase imported as non-lowercase). Renamed to `functional` throughout `pretrain_on_loghub.py`.
+- Context7 was used to verify PyTorch nn.LSTM, DataLoader, and training loop patterns before implementation.
+- The HDFS anomaly rate at the sequence level (2.59%) is lower than the block level (2.93%) because anomalous blocks have fewer log events per block (mean 9.7 vs 12.7), producing fewer chunked sequences per block.
