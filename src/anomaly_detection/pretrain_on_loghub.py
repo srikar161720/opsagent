@@ -125,9 +125,9 @@ def finetune_on_otel_demo(
     history = trainer.train(
         train_sequences=otel_data["train"],
         val_sequences=otel_data["val"],
-        epochs=30,
+        epochs=200,
         batch_size=32,
-        learning_rate=0.0001,
+        learning_rate=0.001,
         early_stopping_patience=10,
     )
 
