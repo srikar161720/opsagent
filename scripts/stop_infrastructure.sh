@@ -16,7 +16,7 @@ echo "=== OpsAgent Infrastructure Shutdown ==="
 echo "[1/2] Stopping OpenTelemetry Demo services..."
 docker compose -f demo_app/docker-compose.demo.yml down
 
-echo "[2/2] Stopping monitoring stack (Prometheus, Grafana, Loki, Kafka)..."
+echo "[2/2] Stopping monitoring stack (Prometheus, Grafana, Loki, Promtail, Kafka)..."
 docker compose down
 
 echo ""

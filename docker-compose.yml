@@ -70,6 +70,24 @@ services:
           memory: 512M
           cpus: '0.5'
 
+  # ── Log Shipping ─────────────────────────────────────────────────────
+  promtail:
+    image: grafana/promtail:2.9.0
+    volumes:
+      - ./infrastructure/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    networks:
+      - opsagent-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+
   # ── Message Queue ────────────────────────────────────────────────────
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
