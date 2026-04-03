@@ -252,21 +252,21 @@ HDFS has ~11M log lines — far more data than 24h of OTel Demo baseline. Pretra
 
 | Parameter | Value |
 |---|---|
-| Dataset | `data/baseline/` windows (normal operation only) |
+| Dataset | `data/baseline_with_logs/` windows processed through `FeatureEngineer` → z-score normalized → `data/splits/otel/` |
 | Data split | 80% train / 20% val (`random_state=42`) — test set is the fault injection evaluation suite |
 | Initialization | Loads `pretrained_hdfs.pt`; falls back to `_load_compatible_weights()` on dim mismatch |
 | Loss | MSE |
-| Optimizer | Adam, lr=0.0001 (10× lower than pretraining to preserve representations) |
+| Optimizer | Adam, lr=0.001 (safe because embedding/output layers are reinitialized due to input_dim mismatch 115→54) |
 | Batch size | 32 |
-| Epochs | 30 (early stopping patience=10) |
-| Platform | Google Colab Pro |
-| Output | `models/lstm_autoencoder/finetuned_otel.pt` |
+| Epochs | 200 (early stopping patience=10; converged at epoch 158 in practice, val_loss=0.134) |
+| Platform | Google Colab Pro (L4 GPU) |
+| Output | `models/lstm_autoencoder/finetuned_otel.pt` (132,326 params, input_dim=54) |
 
 ### The `_load_compatible_weights()` Function — Critical Implementation Detail
 
 The HDFS and OTel Demo datasets will almost certainly have **different `input_dim`** values because:
 - HDFS `input_dim` = `num_templates` from HDFS parsing (~115 on full corpus)
-- OTel Demo `input_dim` = full `feature_dim` from `FeatureEngineer` (~150–450; see §3 formula)
+- OTel Demo `input_dim` = 54 (5 log templates × 2 + 2 + 6 metrics × 7 stats; z-score normalized)
 
 When dimensions differ, PyTorch's `load_state_dict()` throws `RuntimeError`. The fix: load only the LSTM encoder/decoder weights (which are dimension-agnostic once the embedding layer maps to `hidden_dim=64`) and reinitialize the embedding and output layers with the new `input_dim`.
 

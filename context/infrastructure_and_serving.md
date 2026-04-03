@@ -1,9 +1,10 @@
 # Infrastructure & Serving Specifications
 
 **Implementation files:**
-- `docker-compose.yml` — Main monitoring + message queue stack + Docker Stats Exporter
-- `demo_app/docker-compose.demo.yml` — OTel Demo microservices (reduced)
+- `docker-compose.yml` — Main monitoring + message queue stack + Docker Stats Exporter + Promtail
+- `demo_app/docker-compose.demo.yml` — OTel Demo microservices (reduced, with dummy SHIPPING/EMAIL env vars for checkoutservice)
 - `infrastructure/prometheus/prometheus.yml` — Prometheus scrape config
+- `infrastructure/promtail/promtail-config.yml` — Promtail Docker SD config (ships container logs to Loki via Docker socket)
 - `infrastructure/loki/loki-config.yml` — Loki storage config
 - `infrastructure/grafana/provisioning/datasources/datasources.yml` — Grafana datasources
 - `infrastructure/grafana/dashboards/service_overview.json` — Main dashboard
