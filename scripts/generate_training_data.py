@@ -16,9 +16,8 @@ import json
 import os
 import re
 import signal
-import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -38,18 +37,22 @@ SERVICES = [
 
 # Service name filter — matches OTel Demo containers by service label
 # (exposed by the Docker Stats Exporter from com.docker.compose.service)
-_SVC_FILTER = 'service=~"frontend|cartservice|checkoutservice|paymentservice|productcatalogservice|currencyservice|redis"'
+_SVC_FILTER = (
+    'service=~"frontend|cartservice|checkoutservice'
+    "|paymentservice|productcatalogservice"
+    '|currencyservice|redis"'
+)
 
 # Prometheus metric queries via cAdvisor — container-level metrics per service
 METRIC_QUERIES = {
-    "cpu_usage_rate": f'rate(container_cpu_usage_seconds_total{{{_SVC_FILTER}}}[1m])',
-    "memory_usage_bytes": f'container_memory_usage_bytes{{{_SVC_FILTER}}}',
-    "memory_working_set_bytes": f'container_memory_working_set_bytes{{{_SVC_FILTER}}}',
-    "network_rx_bytes_rate": f'rate(container_network_receive_bytes_total{{{_SVC_FILTER}}}[1m])',
-    "network_tx_bytes_rate": f'rate(container_network_transmit_bytes_total{{{_SVC_FILTER}}}[1m])',
-    "network_rx_errors_rate": f'rate(container_network_receive_errors_total{{{_SVC_FILTER}}}[1m])',
-    "network_tx_errors_rate": f'rate(container_network_transmit_errors_total{{{_SVC_FILTER}}}[1m])',
-    "fs_usage_bytes": f'container_fs_usage_bytes{{{_SVC_FILTER}}}',
+    "cpu_usage_rate": f"rate(container_cpu_usage_seconds_total{{{_SVC_FILTER}}}[1m])",
+    "memory_usage_bytes": f"container_memory_usage_bytes{{{_SVC_FILTER}}}",
+    "memory_working_set_bytes": f"container_memory_working_set_bytes{{{_SVC_FILTER}}}",
+    "network_rx_bytes_rate": f"rate(container_network_receive_bytes_total{{{_SVC_FILTER}}}[1m])",
+    "network_tx_bytes_rate": f"rate(container_network_transmit_bytes_total{{{_SVC_FILTER}}}[1m])",
+    "network_rx_errors_rate": f"rate(container_network_receive_errors_total{{{_SVC_FILTER}}}[1m])",
+    "network_tx_errors_rate": f"rate(container_network_transmit_errors_total{{{_SVC_FILTER}}}[1m])",
+    "fs_usage_bytes": f"container_fs_usage_bytes{{{_SVC_FILTER}}}",
 }
 
 
@@ -59,7 +62,8 @@ def parse_duration(duration_str: str) -> int:
     match = re.fullmatch(pattern, duration_str)
     if not match or not any(match.groups()):
         raise ValueError(
-            f"Invalid duration format: '{duration_str}'. Use format like '24h', '30m', '1h30m', '90s'."
+            f"Invalid duration format: '{duration_str}'. "
+            "Use format like '24h', '30m', '1h30m', '90s'."
         )
     hours = int(match.group(1) or 0)
     minutes = int(match.group(2) or 0)
@@ -105,7 +109,8 @@ class TrainingDataCollector:
             resp.raise_for_status()
             data = resp.json()
             if data.get("status") == "success":
-                return data.get("data", {}).get("result", [])
+                result: list[dict[str, Any]] = data.get("data", {}).get("result", [])
+                return result
         except requests.RequestException as e:
             print(f"  [WARN] Prometheus query failed: {e}")
         return []
@@ -113,27 +118,29 @@ class TrainingDataCollector:
     def _query_loki(self, query: str, start_ns: int, end_ns: int) -> list[dict[str, Any]]:
         """Execute a log query against the Loki HTTP API."""
         try:
+            params: dict[str, str] = {
+                "query": query,
+                "start": str(start_ns),
+                "end": str(end_ns),
+                "limit": "5000",
+            }
             resp = requests.get(
                 f"{self.loki_url}/loki/api/v1/query_range",
-                params={
-                    "query": query,
-                    "start": str(start_ns),
-                    "end": str(end_ns),
-                    "limit": 5000,
-                },
+                params=params,
                 timeout=30,
             )
             resp.raise_for_status()
             data = resp.json()
             if data.get("status") == "success":
-                return data.get("data", {}).get("result", [])
+                result: list[dict[str, Any]] = data.get("data", {}).get("result", [])
+                return result
         except requests.RequestException as e:
             print(f"  [WARN] Loki query failed: {e}")
         return []
 
     def collect_metrics_snapshot(self) -> dict[str, Any]:
         """Collect a single metrics snapshot from Prometheus."""
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(UTC).isoformat()
         snapshot: dict[str, Any] = {"timestamp": timestamp, "metrics": {}}
 
         for metric_name, query in METRIC_QUERIES.items():
@@ -142,22 +149,20 @@ class TrainingDataCollector:
             for result in results:
                 metric_labels = result.get("metric", {})
                 # Extract service name from cAdvisor compose service label
-                service = (
-                    metric_labels.get("service")
-                    or metric_labels.get("name")
-                    or "unknown"
-                )
+                service = metric_labels.get("service") or metric_labels.get("name") or "unknown"
                 value = result.get("value", [None, None])
-                snapshot["metrics"][metric_name].append({
-                    "service": service,
-                    "value": float(value[1]) if value[1] and value[1] != "NaN" else None,
-                    "timestamp": value[0] if value[0] else None,
-                })
+                snapshot["metrics"][metric_name].append(
+                    {
+                        "service": service,
+                        "value": float(value[1]) if value[1] and value[1] != "NaN" else None,
+                        "timestamp": value[0] if value[0] else None,
+                    }
+                )
 
         return snapshot
 
     def collect_logs(self) -> list[dict[str, Any]]:
-        """Collect recent logs from Loki for all services."""
+        """Collect recent logs from Loki for all OTel Demo services."""
         now_ns = int(time.time() * 1e9)
         # Look back one interval
         start_ns = max(
@@ -166,18 +171,22 @@ class TrainingDataCollector:
         )
 
         all_logs: list[dict[str, Any]] = []
-        # Query all container logs
-        query = '{job=~".+"}'
-        results = self._query_loki(query, start_ns, now_ns)
 
-        for stream in results:
-            labels = stream.get("stream", {})
-            for ts_ns, line in stream.get("values", []):
-                all_logs.append({
-                    "timestamp_ns": ts_ns,
-                    "labels": labels,
-                    "message": line,
-                })
+        for svc in SERVICES:
+            query = f'{{service="{svc}"}}'
+            results = self._query_loki(query, start_ns, now_ns)
+
+            for stream in results:
+                labels = stream.get("stream", {})
+                for ts_ns, line in stream.get("values", []):
+                    all_logs.append(
+                        {
+                            "timestamp_ns": ts_ns,
+                            "service": svc,
+                            "labels": labels,
+                            "message": line,
+                        }
+                    )
 
         if all_logs:
             # Update watermark to latest timestamp for next iteration
@@ -201,22 +210,21 @@ class TrainingDataCollector:
             for log in logs:
                 f.write(json.dumps(log) + "\n")
 
-    def load_or_create_metadata(
-        self, duration_seconds: int
-    ) -> dict[str, Any]:
+    def load_or_create_metadata(self, duration_seconds: int) -> dict[str, Any]:
         """Load existing metadata for resume, or create new."""
         metadata_path = self.output_dir / "metadata.json"
         if metadata_path.exists():
             with open(metadata_path) as f:
-                metadata = json.load(f)
+                metadata: dict[str, Any] = json.load(f)
             if metadata.get("status") == "collecting":
-                print(f"  Resuming previous collection (snapshots: {metadata.get('metric_snapshots', 0)})")
+                snap_count = metadata.get("metric_snapshots", 0)
+                print(f"  Resuming previous collection (snapshots: {snap_count})")
                 self.metric_snapshots = metadata.get("metric_snapshots", 0)
                 self.log_count = metadata.get("log_count", 0)
                 return metadata
 
         return {
-            "start_time": datetime.now(timezone.utc).isoformat(),
+            "start_time": datetime.now(UTC).isoformat(),
             "end_time": None,
             "status": "collecting",
             "duration_seconds": duration_seconds,
@@ -307,7 +315,7 @@ class TrainingDataCollector:
             metadata["status"] = "completed"
             print("\n  Collection completed successfully.")
 
-        metadata["end_time"] = datetime.now(timezone.utc).isoformat()
+        metadata["end_time"] = datetime.now(UTC).isoformat()
         self.save_metadata(metadata)
 
         print(f"  Total metric snapshots: {self.metric_snapshots}")
