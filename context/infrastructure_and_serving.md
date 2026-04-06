@@ -1313,7 +1313,7 @@ CHROMADB_PATH=data/chromadb
 # ── Agent Configuration ───────────────────────────────────────────────────────
 AGENT_MAX_TOOL_CALLS=10
 AGENT_CONFIDENCE_THRESHOLD=0.7
-LLM_MODEL=gemini-1.5-flash
+LLM_MODEL=gemini-2.5-flash-lite
 LLM_TEMPERATURE=0.1
 
 # ── Anomaly Detection ─────────────────────────────────────────────────────────
@@ -1336,7 +1336,7 @@ class Settings(BaseSettings):
     kafka_bootstrap_servers: str = "localhost:9092"
     agent_max_tool_calls: int = 10
     agent_confidence_threshold: float = 0.7
-    llm_model: str = "gemini-1.5-flash"
+    llm_model: str = "gemini-2.5-flash-lite"
     llm_temperature: float = 0.1
 
     class Config:

@@ -131,7 +131,7 @@ LLM backend, investigation loop controls, per-tool parameters, and causal discov
 
 agent:
   llm:
-    model: "gemini-1.5-flash"   # Primary LLM for reasoning and report generation
+    model: "gemini-2.5-flash-lite"   # Primary LLM for reasoning and report generation
     temperature: 0.1            # Near-deterministic for reproducible RCA reports
     max_output_tokens: 4096     # Sufficient for a complete RCA report
     # API key: loaded from GEMINI_API_KEY environment variable via python-dotenv
@@ -177,8 +177,9 @@ agent:
 causal_discovery:
   algorithm: "pc"             # PC (Peter-Clark) algorithm from causal-learn library
   alpha: 0.05                 # Significance threshold (should match tools.discover_causation.alpha)
-  max_conditioning_set: 3     # Cap on conditioning set size; limits computational cost
-                              # Larger values = more accurate but exponentially slower
+  max_conditioning_set: 4     # Cap on conditioning set size (depth); limits computational cost
+                              # Depth 4 sufficient for OTel Demo chains (max 3 hops)
+                              # Unrestricted depth with 32 columns takes 30+ min at depth 5-6
 ```
 
 ---

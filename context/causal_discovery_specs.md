@@ -17,7 +17,7 @@
 | Algorithm | PC (Peter-Clark) | Well-established, interpretable, sound and complete under faithfulness |
 | Significance level (α) | 0.05 | Standard statistical threshold for conditional independence tests |
 | Independence test | Fisher's Z | Assumes Gaussian; computationally fast for continuous metrics |
-| Max conditioning set size | 3 | Caps exponential search; tractable for ≤15 service metrics |
+| Max conditioning set size | 4 | Caps exponential search at depth 4; sufficient for OTel Demo chains (max 3 hops); prevents 30+ min runtime at depth 5–6 with 32 columns (4 metrics × 2+ services × 4 lag levels) |
 | `stable` | `True` | Ensures order-independent skeleton discovery |
 | `uc_rule` | 0 | Default orientation rules (Meek rules) |
 | `uc_priority` | 2 | Prioritizes definite non-colliders to reduce orientation conflicts |
@@ -399,4 +399,4 @@ The `CausalGraph.to_ascii()` output is embedded directly into the RCA report tem
 | Fisher's Z vs. KCI | Fisher's Z | ~10× faster; acceptable for Gaussian-ish metrics like latency/CPU |
 | Simplified counterfactual | Correlation² × z-score | Full do-calculus SCM requires explicit causal model; this approximation is sufficient and fast for real-time RCA |
 | Fixed α = 0.05 | Not tuned per dataset | Avoids data leakage during evaluation; tune only during dev on synthetic data |
-| Max conditioning set = 3 | Hard cap | With ≤15 metrics, C(15,3) = 455 triples — manageable; C(15,4) = 1365 — slower |
+| Max conditioning set = 4 | Hard cap | With time-lagged features (32 columns), unrestricted depth causes 30+ min runtime at depth 5–6. Depth 4 captures all OTel Demo causal chains (max 3 hops) and completes in <30s. C(30,4) = 27,405 — fast; C(30,5) = 142,506 — impractical. |

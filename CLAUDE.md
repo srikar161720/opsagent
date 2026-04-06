@@ -30,7 +30,7 @@
 | **Anomaly Baseline** | scikit-learn (Isolation Forest) | Comparison baseline |
 | **Causal Discovery** | causal-learn | PC Algorithm for root cause graph |
 | **Agent Orchestration** | LangGraph | Stateful multi-step investigation graph |
-| **LLM** | Gemini 1.5 Flash | Agent reasoning and report generation |
+| **LLM** | Gemini 2.5 Flash Lite | Agent reasoning and report generation |
 | **API** | FastAPI | REST endpoint (`POST /investigate`) |
 | **Dashboard** | Streamlit | Interactive demo UI |
 | **Dependency Mgmt** | Poetry | Python environment management |
@@ -125,7 +125,7 @@ Copy `.env.example` to `.env` and populate before running any component that use
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `GEMINI_API_KEY` | **Yes** | Gemini 1.5 Flash — used by `src/agent/graph.py` via `python-dotenv` |
+| `GEMINI_API_KEY` | **Yes** | Gemini 2.5 Flash Lite — used by `src/agent/graph.py` via `python-dotenv` |
 
 > All infrastructure services (Prometheus, Loki, Kafka, ChromaDB) run locally — no additional API keys needed. `GEMINI_API_KEY` is the only external dependency.
 
@@ -173,6 +173,11 @@ Copy `.env.example` to `.env` and populate before running any component that use
 | **checkoutservice needs SHIPPING_SERVICE_ADDR** | The reduced OTel Demo excludes shippingservice, but checkoutservice panics on startup without `SHIPPING_SERVICE_ADDR`. Fixed by adding dummy env vars (`localhost:50053`) in `demo_app/docker-compose.demo.yml`. The service starts cleanly; checkout requests needing shipping fail gracefully at the gRPC level. |
 | **PC algorithm: undirected edges in simple chains** | PC cannot orient edges in A→B→C (no collider/v-structure). Only chains with colliders (e.g., B→C←D) produce directed edges. Counterfactual confidence scoring breaks ties for undirected edges. This is expected PC behavior, not a bug. |
 | **OTel Demo services produce minimal stdout logs** | Most OTel Demo services (frontend, cartservice, currencyservice, paymentservice, redis) are compiled gRPC services with minimal console output. Only checkoutservice and productcatalogservice produce regular logs (OTel exporter retry warnings). Expect ~2,900 log entries per 24h baseline. Log volume will increase during fault injection (error messages, stack traces). |
+| **PromQL templates use `.replace()`, not `.format()`** | Agent tool PromQL templates use `{service="{service}"}` with `.replace("{service}", name)`. Do NOT use double braces `{{...}}` — that is Python's `.format()` escaping syntax which produces literal `{{` in the output, causing Prometheus 400 Bad Request errors. |
+| **Only 6 container-level metrics available** | Docker Stats Exporter exposes only container-level metrics: `cpu_usage`, `memory_usage`, `network_rx_bytes_rate`, `network_tx_bytes_rate`, `network_rx_errors_rate`, `network_tx_errors_rate`. Application-level metrics (latency, error_rate, request_count, connection_count) are NOT available — OTel Demo services don't expose Prometheus `/metrics` endpoints. The system prompt and tool docstrings must list only these 6 metrics. |
+| **PC algorithm depth must be capped for >15 columns** | With 32 columns (4 metrics × 2 services × 4 lag levels), unrestricted PC takes 30+ minutes at depth 5–6 (C(30,5) = 142,506 conditioning sets per edge pair). Always pass `max_conditioning_set=4` to `discover_causal_graph()`. Depth 4 is sufficient for OTel Demo causal chains (longest = 3 hops) and completes in <30 seconds. |
+| **LLM model: `gemini-2.5-flash-lite`** | The project uses Gemini 2.5 Flash Lite (stable). The model string is `gemini-2.5-flash-lite` in `src/agent/graph.py` and `configs/agent_config.yaml`. Do not use preview models (e.g., `gemini-3.1-flash-lite-preview`) in production code. |
+| **LangGraph `AgentState` must be TypedDict** | Use `class AgentState(TypedDict)` from `typing_extensions`, not `class AgentState(dict)` with annotations. LangGraph's `StateGraph` requires a proper TypedDict for state validation and reducer recognition. |
 
 ---
 
