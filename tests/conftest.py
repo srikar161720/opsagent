@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import numpy as np
+import pandas as pd
 import pytest
 
 # ── Sample log lines ────────────────────────────────────────────────────
@@ -154,9 +156,7 @@ def hdfs_data_dir(tmp_path: Path) -> Path:
 
     def _done(blk: str, ip: str) -> str:
         return (
-            f"{hdr} dfs.DataNode$PacketResponder:"
-            f" Received block {blk} of size 67108864"
-            f" from /{ip}"
+            f"{hdr} dfs.DataNode$PacketResponder: Received block {blk} of size 67108864 from /{ip}"
         )
 
     def _add(blk: str, ip: str) -> str:
@@ -168,17 +168,10 @@ def hdfs_data_dir(tmp_path: Path) -> Path:
         )
 
     def _term(blk: str) -> str:
-        return (
-            f"{hdr} dfs.DataNode$PacketResponder:"
-            f" PacketResponder 1 for block {blk}"
-            " terminating"
-        )
+        return f"{hdr} dfs.DataNode$PacketResponder: PacketResponder 1 for block {blk} terminating"
 
     def _verify(blk: str) -> str:
-        return (
-            f"{hdr} dfs.DataNode$PacketResponder:"
-            f" Verification succeeded for {blk}"
-        )
+        return f"{hdr} dfs.DataNode$PacketResponder: Verification succeeded for {blk}"
 
     log_lines = [
         _recv("blk_1000", "10.0.0.1"),
@@ -211,3 +204,127 @@ def hdfs_data_dir(tmp_path: Path) -> Path:
     (tmp_path / "anomaly_label.csv").write_text("\n".join(label_lines) + "\n")
 
     return tmp_path
+
+
+# ── Agent fixtures ────────────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def sample_alert() -> dict[str, Any]:
+    """Alert dict matching AnomalyDetector output format."""
+    return {
+        "title": "LSTM-AE Anomaly Detected",
+        "severity": "high",
+        "timestamp": datetime.now(UTC).isoformat(),
+        "affected_services": ["cartservice", "checkoutservice"],
+        "anomaly_score": 0.45,
+        "threshold": 0.253,
+    }
+
+
+@pytest.fixture()
+def sample_prometheus_range_response_factory():
+    """Factory for Prometheus range query API responses."""
+
+    def _make(
+        values: list[tuple[float, str]] | None = None,
+        metric_labels: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        if values is None:
+            values = [(1704067200 + i * 15, str(0.05 + i * 0.01)) for i in range(10)]
+        if metric_labels is None:
+            metric_labels = {"service": "frontend"}
+        return {
+            "status": "success",
+            "data": {
+                "resultType": "matrix",
+                "result": [{"metric": metric_labels, "values": values}],
+            },
+        }
+
+    return _make
+
+
+@pytest.fixture()
+def sample_loki_response_factory():
+    """Factory for Loki query_range API responses."""
+
+    def _make(
+        entries: list[tuple[str, str]] | None = None,
+        stream_labels: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        if entries is None:
+            entries = [
+                ("1704067200000000000", "INFO: Request processed successfully"),
+                ("1704067201000000000", "ERROR: Connection refused to redis:6379"),
+                ("1704067202000000000", "WARN: Retry attempt 3 for upstream"),
+            ]
+        if stream_labels is None:
+            stream_labels = {"service": "cartservice", "job": "docker"}
+        return {
+            "status": "success",
+            "data": {
+                "resultType": "streams",
+                "result": [{"stream": stream_labels, "values": entries}],
+            },
+        }
+
+    return _make
+
+
+@pytest.fixture()
+def sample_agent_config() -> dict[str, Any]:
+    """Agent config dict matching configs/agent_config.yaml structure."""
+    return {
+        "agent": {
+            "llm": {
+                "model": "gemini-2.5-flash-lite",
+                "temperature": 0.1,
+                "max_output_tokens": 4096,
+            },
+            "investigation": {
+                "max_tool_calls": 10,
+                "confidence_threshold": 0.7,
+                "timeout_seconds": 300,
+            },
+            "tools": {
+                "query_metrics": {
+                    "prometheus_url": "http://localhost:9090",
+                    "default_time_range_minutes": 30,
+                },
+                "search_logs": {
+                    "loki_url": "http://localhost:3100",
+                    "default_limit": 100,
+                },
+                "search_runbooks": {
+                    "chroma_persist_dir": "data/chromadb/",
+                    "collection_name": "runbooks",
+                    "top_k": 3,
+                },
+                "discover_causation": {
+                    "alpha": 0.05,
+                    "lags": [1, 2, 5],
+                },
+            },
+        }
+    }
+
+
+@pytest.fixture()
+def sample_causal_metrics_df() -> pd.DataFrame:
+    """Synthetic multi-service metric DataFrame for causal discovery tests.
+
+    Creates A → B → C causal chain with noise.
+    """
+    rng = np.random.default_rng(42)
+    n = 100
+    a = rng.normal(0, 1, n)
+    b = 0.8 * a + rng.normal(0, 0.3, n)
+    c = 0.6 * b + rng.normal(0, 0.3, n)
+    return pd.DataFrame(
+        {
+            "service_a_cpu": a,
+            "service_b_cpu": b,
+            "service_c_cpu": c,
+        }
+    )
