@@ -23,6 +23,7 @@ def discover_causal_graph(
     stable: bool = True,
     uc_rule: int = 0,
     uc_priority: int = 2,
+    max_conditioning_set: int | None = None,
 ) -> Any:
     """Discover causal relationships between services using the PC algorithm.
 
@@ -33,6 +34,11 @@ def discover_causal_graph(
         stable: Use stabilized skeleton discovery (order-independent).
         uc_rule: Rule for orienting unshielded colliders (0 = uc_sepset).
         uc_priority: Conflict resolution priority (2 = prioritize existing).
+        max_conditioning_set: Maximum size of the conditioning set for the
+            PC skeleton phase.  Caps the depth of the search to avoid
+            combinatorial explosion with many variables.  ``None`` means
+            unlimited (causal-learn default).  Recommended: 3–4 when the
+            number of columns exceeds ~15.
 
     Returns:
         A causal-learn ``CausalGraph`` object.  Edge semantics::
@@ -41,14 +47,18 @@ def discover_causal_graph(
             cg.G.graph[i, j] == -1 and cg.G.graph[j, i] == -1  →  i — j
             cg.G.graph[i, j] == 1  and cg.G.graph[j, i] == 1   →  i ↔ j
     """
-    cg = pc(
-        data=metrics_df.values,
-        alpha=alpha,
-        indep_test=fisherz,
-        stable=stable,
-        uc_rule=uc_rule,
-        uc_priority=uc_priority,
-    )
+    kwargs: dict[str, Any] = {
+        "data": metrics_df.values,
+        "alpha": alpha,
+        "indep_test": fisherz,
+        "stable": stable,
+        "uc_rule": uc_rule,
+        "uc_priority": uc_priority,
+    }
+    if max_conditioning_set is not None:
+        kwargs["depth"] = max_conditioning_set
+
+    cg = pc(**kwargs)
     return cg
 
 
