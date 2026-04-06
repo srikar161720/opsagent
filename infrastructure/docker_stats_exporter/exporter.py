@@ -12,11 +12,10 @@ from __future__ import annotations
 
 import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 import docker
-
 
 # How often the background thread refreshes stats (seconds).
 COLLECT_INTERVAL = 10.0
@@ -212,8 +211,8 @@ def main() -> None:
 
     server = HTTPServer(("0.0.0.0", port), MetricsHandler)
     print(f"Docker Stats Exporter listening on :{port}")
-    print(f"  /metrics  — Prometheus metrics endpoint")
-    print(f"  /health   — Health check")
+    print("  /metrics  — Prometheus metrics endpoint")
+    print("  /health   — Health check")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
