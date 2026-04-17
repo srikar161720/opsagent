@@ -136,7 +136,40 @@ class AgentExecutor:
         )
 
     def _extract_top3(self, state: dict[str, Any]) -> list[str]:
-        """Extract top 3 hypothesis service names sorted by confidence."""
+        """Extract top 3 hypothesis service names sorted by confidence.
+
+        Falls back to root_cause and causal graph edges when hypotheses
+        are empty (e.g., due to JSON parsing failure in the LLM response).
+        """
         hypotheses = state.get("hypotheses", [])
         sorted_h = sorted(hypotheses, key=lambda h: h.get("confidence", 0), reverse=True)
-        return [h["service"] for h in sorted_h[:3] if "service" in h]
+        result = [h["service"] for h in sorted_h[:3] if "service" in h]
+
+        # Fallback: ensure root_cause is in the list
+        root = state.get("root_cause")
+        if root and root not in ("unknown", "inconclusive") and root not in result:
+            result.insert(0, root)
+
+        # Fallback: pad from causal graph edges if still short
+        if len(result) < 3:
+            causal = state.get("causal_graph") or {}
+            for edge in causal.get("causal_edges", []):
+                for key in ("source", "target"):
+                    svc = edge.get(key, "")
+                    # Strip metric suffix (e.g., "redis_cpu" → "redis")
+                    for known in (
+                        "cartservice",
+                        "checkoutservice",
+                        "currencyservice",
+                        "frontend",
+                        "paymentservice",
+                        "productcatalogservice",
+                        "redis",
+                    ):
+                        if svc.startswith(known) and known not in result:
+                            result.append(known)
+                            break
+                if len(result) >= 3:
+                    break
+
+        return result[:3]

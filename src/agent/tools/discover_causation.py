@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 
+import numpy as np
 import pandas as pd
 from langchain_core.tools import tool
 
@@ -28,10 +29,23 @@ logger = logging.getLogger(__name__)
 
 # Metrics to fetch per service for causal analysis
 _CAUSAL_METRICS: dict[str, str] = {
+    # Container-level metrics (available for all services)
     "cpu": 'rate(container_cpu_usage_seconds_total{service="{service}"}[1m])',
     "memory": 'container_memory_working_set_bytes{service="{service}"}',
     "net_rx": 'rate(container_network_receive_bytes_total{service="{service}"}[1m])',
     "net_tx": 'rate(container_network_transmit_bytes_total{service="{service}"}[1m])',
+    # Application-level metrics (available for services exporting traces)
+    "request_rate": 'sum(rate(span_calls_total{service_name="{service}"}[1m]))',
+    "error_rate": (
+        'sum(rate(span_calls_total{service_name="{service}",status_code="STATUS_CODE_ERROR"}[1m]))'
+    ),
+    "latency": (
+        "histogram_quantile(0.99, "
+        'sum(rate(span_duration_milliseconds_bucket{service_name="{service}"}[1m])) by (le))'
+    ),
+    # Service probe metrics (available for all services)
+    "probe_up": 'service_probe_up{service="{service}"}',
+    "probe_latency": 'service_probe_duration_seconds{service="{service}"}',
 }
 
 
@@ -72,6 +86,17 @@ def discover_causation(
             "error": "At least 2 services are required for causal discovery.",
         }
 
+    # Hard-cap at 5 services to prevent combinatorial explosion in PC.
+    # With 4 metrics × 5 services × 4 lag levels = 80 columns — manageable.
+    # More than 5 services produces 100+ columns and can take 30+ minutes.
+    if len(services) > 5:
+        logger.warning(
+            "Capping causal discovery to 5 services (received %d). "
+            "Pass your top suspects, not the full system.",
+            len(services),
+        )
+        services = services[:5]
+
     try:
         # 1. Fetch metrics from Prometheus for each service
         collector = MetricsCollector()
@@ -96,14 +121,51 @@ def discover_causation(
 
         metrics_df = pd.DataFrame({k: v[:min_len] for k, v in columns.items()})
 
+        # Drop zero-variance columns before causal discovery.
+        # network_rx/tx_errors_rate are zero during normal operation, and
+        # crashed services return constant (all-zero) metrics. These cause
+        # a singular correlation matrix in Fisher's Z test.
+        variance = metrics_df.var()
+        zero_var_cols = variance[variance < 1e-12].index.tolist()
+        if zero_var_cols:
+            logger.info(
+                "Dropping %d zero-variance columns: %s",
+                len(zero_var_cols),
+                zero_var_cols[:5],
+            )
+            metrics_df = metrics_df.drop(columns=zero_var_cols)
+
+        if metrics_df.shape[1] < 2:
+            return _inconclusive("Fewer than 2 non-constant metric columns after filtering.")
+
         # 2. Create time-lagged features
-        lagged_df = create_time_lags(metrics_df, lags=[1, 2, 5])
+        # Use lags=[1, 2] instead of [1, 2, 5] to reduce column count.
+        lagged_df = create_time_lags(metrics_df, lags=[1, 2])
         if len(lagged_df) < 10:
             return _inconclusive("Too few rows after time-lag creation.")
 
-        # 3. Run PC algorithm (depth capped at 4 to avoid combinatorial
-        #    explosion — 32 columns at unrestricted depth can take 30+ min)
-        cg = discover_causal_graph(lagged_df, alpha=0.05, max_conditioning_set=4)
+        # Drop zero-variance lagged columns
+        lag_var = lagged_df.var()
+        zero_var_lagged = lag_var[lag_var < 1e-12].index.tolist()
+        if zero_var_lagged:
+            lagged_df = lagged_df.drop(columns=zero_var_lagged)
+
+        # Drop perfectly correlated columns (r > 0.999).
+        # Lagged copies of slow-changing metrics (e.g. memory) are nearly
+        # identical, making the correlation matrix singular even though no
+        # single column is zero-variance.
+        lagged_df = _drop_correlated_columns(lagged_df, threshold=0.999)
+
+        if lagged_df.shape[1] < 2:
+            return _inconclusive("Fewer than 2 independent columns after correlation filtering.")
+
+        # Add tiny jitter as a safety net against remaining near-singularities
+        rng = np.random.default_rng(42)
+        lagged_df = lagged_df + rng.normal(0, 1e-8, lagged_df.shape)
+
+        # 3. Run PC algorithm (depth capped at 3 to avoid combinatorial
+        #    explosion with many columns)
+        cg = discover_causal_graph(lagged_df, alpha=0.05, max_conditioning_set=3)
 
         # 4. Parse directed edges
         edges = parse_causal_graph(cg, list(lagged_df.columns))
@@ -190,6 +252,20 @@ def discover_causation(
     except Exception:
         logger.exception("discover_causation failed")
         return _inconclusive("Causal discovery encountered an error.")
+
+
+def _drop_correlated_columns(df: pd.DataFrame, threshold: float = 0.999) -> pd.DataFrame:
+    """Drop columns that are perfectly (or near-perfectly) correlated.
+
+    For each pair with |r| > threshold, the second column is dropped.
+    This prevents singular correlation matrices in Fisher's Z test.
+    """
+    corr = df.corr().abs()
+    upper = corr.where(np.triu(np.ones(corr.shape, dtype=bool), k=1))
+    to_drop = [col for col in upper.columns if any(upper[col] > threshold)]
+    if to_drop:
+        logger.info("Dropping %d correlated columns: %s", len(to_drop), to_drop[:5])
+    return df.drop(columns=to_drop)
 
 
 def _inconclusive(reason: str) -> dict:
