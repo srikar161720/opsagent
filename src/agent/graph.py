@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any
 
 from dotenv import load_dotenv
@@ -39,6 +40,7 @@ def _get_llm() -> ChatGoogleGenerativeAI:
         temperature=0.1,
         max_output_tokens=4096,
         google_api_key=api_key,
+        max_retries=3,
     )
 
 
@@ -152,6 +154,9 @@ def gather_evidence_node(state: AgentState) -> dict[str, Any]:
         "Gather evidence to validate or refute your hypotheses. "
         "Use query_metrics and search_logs on your top 2-3 suspect services. "
         "Use search_runbooks if you have a strong hypothesis about the issue type.\n\n"
+        "IMPORTANT: Use time_range_minutes=10 for all query_metrics calls "
+        "(not the default 30). A shorter window gives better signal-to-noise "
+        "for recent faults.\n\n"
         f"Remaining tool calls: {remaining - 1} (reserving 1 for causal analysis)\n\n"
         f"Current hypotheses:\n{json.dumps(hypotheses, indent=2)}"
     )
@@ -204,6 +209,42 @@ def gather_evidence_node(state: AgentState) -> dict[str, Any]:
             )
             calls_used += 1
 
+    # Force a log search if the LLM didn't do one and budget allows.
+    # Logs reveal error patterns (connection refused, timeout, panic) that
+    # are invisible in container-level metrics.
+    logs_searched = any(e.get("tool") == "search_logs" for e in new_evidence)
+    budget_left = remaining - calls_used
+    if not logs_searched and budget_left > 1 and hypotheses:
+        top_svc = hypotheses[0].get("service", "")
+        if top_svc:
+            from src.agent.tools.search_logs import search_logs
+
+            try:
+                log_result = search_logs.invoke(
+                    {
+                        "query": "error OR crash OR timeout OR refused OR panic OR fatal",
+                        "service_filter": top_svc,
+                        "time_range_minutes": 10,
+                        "limit": 50,
+                    }
+                )
+                log_str = json.dumps(log_result, default=str)
+                new_messages.append(
+                    AIMessage(content=f"[Auto] Log search for {top_svc}:\n{log_str[:500]}")
+                )
+                new_evidence.append(
+                    {
+                        "tool": "search_logs",
+                        "args": {"service_filter": top_svc, "query": "error"},
+                        "finding": log_str[:500],
+                        "timestamp": state.get("anomaly_window", ("", ""))[0],
+                        "supports_hypothesis": "",
+                    }
+                )
+                calls_used += 1
+            except Exception:
+                logger.warning("Forced log search for %s failed", top_svc)
+
     return {
         "messages": new_messages,
         "evidence": new_evidence,
@@ -249,7 +290,10 @@ def analyze_causation_node(state: AgentState) -> dict[str, Any]:
 
     # Run causal discovery
     try:
-        causal_result = discover_causation.invoke({"services": services, "time_range_minutes": 30})
+        # Use a 10-minute window to maximize the anomaly-to-baseline ratio.
+        # With a 60s pre-investigation wait, ~4 of the 40 data points (15s step)
+        # will contain the fault signal — much stronger than 4/120 with 30 min.
+        causal_result = discover_causation.invoke({"services": services, "time_range_minutes": 10})
     except Exception as exc:
         logger.exception("Causal discovery failed")
         causal_result = {
@@ -260,14 +304,93 @@ def analyze_causation_node(state: AgentState) -> dict[str, Any]:
             "graph_ascii": "",
         }
 
-    root_cause = causal_result.get("root_cause", "unknown")
-    confidence = causal_result.get("root_cause_confidence", 0.0)
+    causal_root = causal_result.get("root_cause", "unknown")
+    causal_confidence = causal_result.get("root_cause_confidence", 0.0)
+
+    # Determine final root cause: combine causal discovery with LLM hypotheses.
+    # If causal confidence is low (< 50%) or result is "inconclusive",
+    # prefer the LLM's top hypothesis — especially important when the true
+    # root cause service is DOWN and invisible to the PC algorithm.
+    root_cause = causal_root
+    confidence = causal_confidence
+
+    # Check evidence for any service with a CRITICAL signal (stale/sparse/no data)
+    evidence = state.get("evidence", [])
+    critical_services: set[str] = set()
+    for e in evidence:
+        if "CRITICAL" in str(e.get("finding", "")):
+            # Extract service name from the tool args
+            args = e.get("args", {})
+            svc = args.get("service_name", "") if isinstance(args, dict) else ""
+            if svc:
+                critical_services.add(svc)
+
+    top_hypothesis = next(
+        (
+            h
+            for h in sorted(hypotheses, key=lambda x: x.get("confidence", 0), reverse=True)
+            if h.get("service")
+        ),
+        None,
+    )
+
+    # Priority 1: If ANY service has a CRITICAL signal (stale/sparse/no data),
+    # it is almost certainly DOWN — override everything else.
+    # A CRITICAL signal is stronger than any LLM reasoning or PC result
+    # because it means the service literally stopped reporting metrics.
+    if critical_services:
+        # Pick the CRITICAL service that appears highest in the hypothesis list
+        critical_in_hypotheses = next(
+            (
+                h["service"]
+                for h in sorted(
+                    hypotheses,
+                    key=lambda x: x.get("confidence", 0),
+                    reverse=True,
+                )
+                if h.get("service") in critical_services
+            ),
+            None,
+        )
+        if critical_in_hypotheses:
+            root_cause = critical_in_hypotheses
+            confidence = 0.75
+            logger.info(
+                "CRITICAL override: %s has stale/sparse metrics (service DOWN)",
+                root_cause,
+            )
+        elif critical_services:
+            # CRITICAL service not in hypotheses — use the first one
+            root_cause = next(iter(critical_services))
+            confidence = 0.70
+            logger.info(
+                "CRITICAL override (not in hypotheses): %s",
+                root_cause,
+            )
+    elif causal_confidence < 0.5 or causal_root in ("inconclusive", "unknown"):
+        # Priority 2: Low-confidence causal result — prefer LLM hypothesis
+        if top_hypothesis:
+            hyp_svc = top_hypothesis["service"]
+            hyp_conf = top_hypothesis.get("confidence", 0.0)
+            if hyp_conf > causal_confidence:
+                root_cause = hyp_svc
+                confidence = min(hyp_conf, 0.6)
+                logger.info(
+                    "Overriding low-confidence causal %s (%.0f%%) with hypothesis %s (%.0f%%)",
+                    causal_root,
+                    causal_confidence * 100,
+                    root_cause,
+                    confidence * 100,
+                )
+    elif top_hypothesis and top_hypothesis["service"] != causal_root:
+        # Priority 3: PC and LLM disagree — use average confidence
+        confidence = (causal_confidence + top_hypothesis.get("confidence", 0.0)) / 2
 
     causation_message = AIMessage(
         content=(
             f"Causal analysis complete.\n\n"
-            f"**Root cause:** {root_cause}\n"
-            f"**Confidence:** {confidence:.0%}\n\n"
+            f"**PC Algorithm root cause:** {causal_root} ({causal_confidence:.0%})\n"
+            f"**Final root cause (combined):** {root_cause} ({confidence:.0%})\n\n"
             f"**Causal graph:**\n```\n{causal_result.get('graph_ascii', '')}\n```\n\n"
             f"**Counterfactual:** {causal_result.get('counterfactual', '')}"
         )
@@ -374,17 +497,54 @@ def build_graph() -> Any:
 
 
 def _parse_hypotheses(content: str, existing: list[dict]) -> list[dict]:
-    """Best-effort parse hypotheses JSON from LLM response text."""
-    # Try to find JSON array in the response
-    start = content.find("[")
-    end = content.rfind("]")
+    """Best-effort parse hypotheses JSON from LLM response text.
+
+    Three-tier extraction strategy:
+    1. Strip markdown code fences, then extract JSON array
+    2. Raw bracket extraction (original approach)
+    3. Regex fallback: extract service names from text patterns
+    """
+    # Tier 1: Strip markdown code fences (```json ... ```)
+    cleaned = re.sub(r"```(?:json)?\s*(.*?)\s*```", r"\1", content, flags=re.DOTALL)
+
+    # Tier 2: Extract JSON array from cleaned text
+    start = cleaned.find("[")
+    end = cleaned.rfind("]")
     if start != -1 and end != -1 and end > start:
         try:
-            parsed = json.loads(content[start : end + 1])
-            if isinstance(parsed, list):
+            parsed = json.loads(cleaned[start : end + 1])
+            if isinstance(parsed, list) and parsed:
                 return parsed
         except json.JSONDecodeError:
             pass
+
+    # Tier 3: Regex fallback — extract service names from patterns like
+    # "service": "cartservice" or **cartservice** is the root cause
+    known_services = {
+        "cartservice",
+        "checkoutservice",
+        "currencyservice",
+        "frontend",
+        "paymentservice",
+        "productcatalogservice",
+        "redis",
+    }
+    found: list[str] = []
+    for svc in known_services:
+        if svc in content.lower() and svc not in found:
+            found.append(svc)
+
+    if found:
+        return [
+            {
+                "service": svc,
+                "confidence": 0.5,
+                "reason": "extracted from text",
+                "status": "investigating",
+            }
+            for svc in found[:5]
+        ]
+
     return existing
 
 
