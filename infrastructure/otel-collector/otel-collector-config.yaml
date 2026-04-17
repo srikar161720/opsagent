@@ -1,0 +1,46 @@
+# OpenTelemetry Collector configuration for OpsAgent.
+# Receives OTLP metrics from OTel Demo services and exposes them
+# as Prometheus-scrapeable metrics on port 9464.
+#
+# The spanmetrics connector is configured to derive request rate, error rate,
+# and latency histograms from trace spans when trace export is enabled.
+# Currently, OTel Demo v1.7.0 services export process-level metrics but
+# traces require additional configuration (see CLAUDE.md for details).
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 10s
+    send_batch_size: 1024
+
+connectors:
+  spanmetrics:
+    namespace: span
+    dimensions:
+      - name: rpc.service
+      - name: rpc.method
+      - name: rpc.grpc.status_code
+      - name: http.method
+      - name: http.status_code
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:9464
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [spanmetrics]
+    metrics:
+      receivers: [otlp, spanmetrics]
+      processors: [batch]
+      exporters: [prometheus]
