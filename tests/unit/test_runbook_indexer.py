@@ -12,9 +12,7 @@ class TestChunkContent:
     """Tests for the paragraph-based chunking logic."""
 
     def test_chunk_content_splits_paragraphs(self) -> None:
-        content = (
-            "Paragraph one.\n\nParagraph two.\n\nParagraph three."
-        )
+        content = "Paragraph one.\n\nParagraph two.\n\nParagraph three."
         indexer_cls = RunbookIndexer.__new__(RunbookIndexer)
         chunks = indexer_cls._chunk_content(content, chunk_size=500)
         assert len(chunks) == 1
@@ -22,9 +20,7 @@ class TestChunkContent:
         assert "Paragraph three." in chunks[0]
 
     def test_chunk_content_respects_size(self) -> None:
-        content = (
-            "A" * 100 + "\n\n" + "B" * 100 + "\n\n" + "C" * 100
-        )
+        content = "A" * 100 + "\n\n" + "B" * 100 + "\n\n" + "C" * 100
         indexer_cls = RunbookIndexer.__new__(RunbookIndexer)
         chunks = indexer_cls._chunk_content(content, chunk_size=150)
         assert len(chunks) >= 2
@@ -56,9 +52,7 @@ class TestRunbookIndexer:
     """Tests for indexing and search with mocked ChromaDB."""
 
     @patch("src.knowledge_base.runbook_indexer.chromadb")
-    @patch(
-        "src.knowledge_base.runbook_indexer.embedding_functions"
-    )
+    @patch("src.knowledge_base.runbook_indexer.embedding_functions")
     def test_init_creates_collection(
         self,
         mock_ef: MagicMock,
@@ -68,14 +62,10 @@ class TestRunbookIndexer:
         mock_chromadb.PersistentClient.return_value = mock_client
         RunbookIndexer(persist_directory="/tmp/test_chromadb")
         mock_client.get_or_create_collection.assert_called_once()
-        call_kwargs = (
-            mock_client.get_or_create_collection.call_args
-        )
+        call_kwargs = mock_client.get_or_create_collection.call_args
         assert call_kwargs.kwargs.get("name") == "runbooks"
 
-    def test_index_file_returns_chunk_count(
-        self, tmp_path: Path
-    ) -> None:
+    def test_index_file_returns_chunk_count(self, tmp_path: Path) -> None:
         indexer, mock_collection = _make_mock_indexer()
         md_file = tmp_path / "test.md"
         md_file.write_text("Para 1.\n\nPara 2.\n\nPara 3.")
@@ -85,9 +75,7 @@ class TestRunbookIndexer:
         assert count >= 1
         assert mock_collection.upsert.call_count == count
 
-    def test_index_file_calls_upsert(
-        self, tmp_path: Path
-    ) -> None:
+    def test_index_file_calls_upsert(self, tmp_path: Path) -> None:
         indexer, mock_collection = _make_mock_indexer()
         md_file = tmp_path / "runbook.md"
         md_file.write_text("Short content.")
@@ -142,12 +130,8 @@ class TestRunbookIndexer:
 
         results = indexer.search("query", top_k=2)
 
-        assert results[0]["relevance_score"] == round(
-            1.0 - 0.1, 4
-        )
-        assert results[1]["relevance_score"] == round(
-            1.0 - 0.4, 4
-        )
+        assert results[0]["relevance_score"] == round(1.0 - 0.1, 4)
+        assert results[1]["relevance_score"] == round(1.0 - 0.4, 4)
 
     def test_search_empty_results(self) -> None:
         indexer, mock_collection = _make_mock_indexer()
@@ -160,9 +144,7 @@ class TestRunbookIndexer:
         results = indexer.search("no match", top_k=3)
         assert results == []
 
-    def test_index_directory_iterates_md_files(
-        self, tmp_path: Path
-    ) -> None:
+    def test_index_directory_iterates_md_files(self, tmp_path: Path) -> None:
         indexer, mock_collection = _make_mock_indexer()
         (tmp_path / "a.md").write_text("Content A")
         (tmp_path / "b.md").write_text("Content B")

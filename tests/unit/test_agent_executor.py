@@ -169,12 +169,44 @@ class TestExtractTop3:
         top3 = executor._extract_top3(state)
         assert top3 == ["only_one"]
 
-    def test_extract_top3_empty(self, sample_agent_config: dict) -> None:
+    def test_extract_top3_empty_hypotheses_falls_back_to_root_cause(
+        self, sample_agent_config: dict
+    ) -> None:
         from src.agent.executor import AgentExecutor
 
         with patch("src.agent.executor.build_graph"):
             executor = AgentExecutor(sample_agent_config)
 
-        state = {"hypotheses": []}
+        state = {"hypotheses": [], "root_cause": "cartservice"}
+        top3 = executor._extract_top3(state)
+        assert "cartservice" in top3
+
+    def test_extract_top3_empty_no_root_cause(self, sample_agent_config: dict) -> None:
+        from src.agent.executor import AgentExecutor
+
+        with patch("src.agent.executor.build_graph"):
+            executor = AgentExecutor(sample_agent_config)
+
+        state = {"hypotheses": [], "root_cause": "unknown"}
         top3 = executor._extract_top3(state)
         assert top3 == []
+
+    def test_extract_top3_pads_from_causal_edges(self, sample_agent_config: dict) -> None:
+        from src.agent.executor import AgentExecutor
+
+        with patch("src.agent.executor.build_graph"):
+            executor = AgentExecutor(sample_agent_config)
+
+        state = {
+            "hypotheses": [],
+            "root_cause": "cartservice",
+            "causal_graph": {
+                "causal_edges": [
+                    {"source": "redis_cpu", "target": "cartservice_memory"},
+                    {"source": "frontend_cpu", "target": "redis_net_rx"},
+                ],
+            },
+        }
+        top3 = executor._extract_top3(state)
+        assert top3[0] == "cartservice"
+        assert len(top3) == 3  # padded from causal edges

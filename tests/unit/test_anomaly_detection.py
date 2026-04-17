@@ -95,9 +95,7 @@ class TestLSTMAutoencoder:
         loss = torch.mean((output - sample_batch) ** 2)
         loss.backward()
         for name, param in small_model.named_parameters():
-            assert param.grad is not None, (
-                f"No gradient for {name}"
-            )
+            assert param.grad is not None, f"No gradient for {name}"
 
     def test_default_hyperparameters(self) -> None:
         model = LSTMAutoencoder(input_dim=10)
@@ -159,16 +157,10 @@ class TestAnomalyTrainer:
         )
         assert "train_loss" in history
         assert "val_loss" in history
-        assert len(history["train_loss"]) == len(
-            history["val_loss"]
-        )
-        assert all(
-            isinstance(v, float) for v in history["train_loss"]
-        )
+        assert len(history["train_loss"]) == len(history["val_loss"])
+        assert all(isinstance(v, float) for v in history["train_loss"])
 
-    def test_device_auto(
-        self, small_model: LSTMAutoencoder
-    ) -> None:
+    def test_device_auto(self, small_model: LSTMAutoencoder) -> None:
         trainer = AnomalyTrainer(small_model, device="auto")
         assert trainer.device in ("cpu", "cuda")
 
@@ -182,9 +174,7 @@ class TestThreshold:
         small_model: LSTMAutoencoder,
         small_val_data: np.ndarray,
     ) -> None:
-        result = calculate_threshold(
-            small_model, small_val_data, percentile=95
-        )
+        result = calculate_threshold(small_model, small_val_data, percentile=95)
         assert isinstance(result, float)
 
     def test_percentile_ordering(
@@ -192,24 +182,14 @@ class TestThreshold:
         small_model: LSTMAutoencoder,
         small_val_data: np.ndarray,
     ) -> None:
-        t50 = calculate_threshold(
-            small_model, small_val_data, percentile=50
-        )
-        t95 = calculate_threshold(
-            small_model, small_val_data, percentile=95
-        )
+        t50 = calculate_threshold(small_model, small_val_data, percentile=50)
+        t95 = calculate_threshold(small_model, small_val_data, percentile=95)
         assert t95 >= t50
 
-    def test_batch_processing(
-        self, small_model: LSTMAutoencoder
-    ) -> None:
+    def test_batch_processing(self, small_model: LSTMAutoencoder) -> None:
         np.random.seed(42)
-        data = np.random.randn(100, SEQ_LEN, INPUT_DIM).astype(
-            np.float32
-        )
-        result = calculate_threshold(
-            small_model, data, batch_size=32
-        )
+        data = np.random.randn(100, SEQ_LEN, INPUT_DIM).astype(np.float32)
+        result = calculate_threshold(small_model, data, batch_size=32)
         assert isinstance(result, float)
         assert result > 0
 
@@ -247,9 +227,7 @@ class TestIsolationForestDetector:
 
 
 class TestAnomalyDetector:
-    def test_score_returns_float(
-        self, small_model: LSTMAutoencoder
-    ) -> None:
+    def test_score_returns_float(self, small_model: LSTMAutoencoder) -> None:
         callback = MagicMock()
         detector = AnomalyDetector(
             model=small_model,
@@ -257,15 +235,11 @@ class TestAnomalyDetector:
             on_anomaly=callback,
         )
         np.random.seed(42)
-        seq = np.random.randn(SEQ_LEN, INPUT_DIM).astype(
-            np.float32
-        )
+        seq = np.random.randn(SEQ_LEN, INPUT_DIM).astype(np.float32)
         result = detector.score(seq)
         assert isinstance(result, float)
 
-    def test_callback_fired_on_anomaly(
-        self, small_model: LSTMAutoencoder
-    ) -> None:
+    def test_callback_fired_on_anomaly(self, small_model: LSTMAutoencoder) -> None:
         callback = MagicMock()
         detector = AnomalyDetector(
             model=small_model,
@@ -274,9 +248,7 @@ class TestAnomalyDetector:
             affected_services=["frontend"],
         )
         np.random.seed(42)
-        seq = np.random.randn(SEQ_LEN, INPUT_DIM).astype(
-            np.float32
-        )
+        seq = np.random.randn(SEQ_LEN, INPUT_DIM).astype(np.float32)
         detector.score(seq)
         callback.assert_called_once()
         alert = callback.call_args[0][0]
@@ -285,9 +257,7 @@ class TestAnomalyDetector:
         assert "affected_services" in alert
         assert alert["severity"] == "high"
 
-    def test_callback_not_fired_on_normal(
-        self, small_model: LSTMAutoencoder
-    ) -> None:
+    def test_callback_not_fired_on_normal(self, small_model: LSTMAutoencoder) -> None:
         callback = MagicMock()
         detector = AnomalyDetector(
             model=small_model,
@@ -295,9 +265,7 @@ class TestAnomalyDetector:
             on_anomaly=callback,
         )
         np.random.seed(42)
-        seq = np.random.randn(SEQ_LEN, INPUT_DIM).astype(
-            np.float32
-        )
+        seq = np.random.randn(SEQ_LEN, INPUT_DIM).astype(np.float32)
         detector.score(seq)
         callback.assert_not_called()
 
@@ -306,9 +274,7 @@ class TestAnomalyDetector:
 
 
 class TestLoadCompatibleWeights:
-    def test_loads_subset_of_tensors(
-        self, tmp_path: Path
-    ) -> None:
+    def test_loads_subset_of_tensors(self, tmp_path: Path) -> None:
         torch.manual_seed(42)
         old_model = LSTMAutoencoder(
             input_dim=5,
@@ -335,30 +301,21 @@ class TestLoadCompatibleWeights:
             dropout=0.0,
             seq_len=3,
         )
-        pre_encoder_weight = (
-            new_model.encoder.weight_ih_l0.clone()
-        )
+        pre_encoder_weight = new_model.encoder.weight_ih_l0.clone()
 
         _load_compatible_weights(new_model, ckpt_path)
 
         # LSTM encoder weights should have been transferred
-        assert not torch.allclose(
-            new_model.encoder.weight_ih_l0, pre_encoder_weight
-        )
+        assert not torch.allclose(new_model.encoder.weight_ih_l0, pre_encoder_weight)
         assert torch.allclose(
             new_model.encoder.weight_ih_l0,
             old_model.encoder.weight_ih_l0,
         )
 
         # Embedding should NOT match old model (input_dim differs)
-        assert (
-            new_model.embedding.in_features
-            != old_model.embedding.in_features
-        )
+        assert new_model.embedding.in_features != old_model.embedding.in_features
 
-    def test_handles_wrapped_checkpoint(
-        self, tmp_path: Path
-    ) -> None:
+    def test_handles_wrapped_checkpoint(self, tmp_path: Path) -> None:
         torch.manual_seed(42)
         model = LSTMAutoencoder(
             input_dim=5,
@@ -405,9 +362,5 @@ class TestOneHotEncode:
         result = _one_hot_encode(seqs, num_classes=3)
         expected_0 = [1.0, 0.0, 0.0]
         expected_1 = [0.0, 1.0, 0.0]
-        np.testing.assert_array_almost_equal(
-            result[0, 0], expected_0
-        )
-        np.testing.assert_array_almost_equal(
-            result[0, 1], expected_1
-        )
+        np.testing.assert_array_almost_equal(result[0, 0], expected_0)
+        np.testing.assert_array_almost_equal(result[0, 1], expected_1)

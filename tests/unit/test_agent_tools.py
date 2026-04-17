@@ -77,11 +77,20 @@ class TestQueryMetrics:
     """Tests for the query_metrics agent tool."""
 
     def _mock_range_response(self, values: list[float]) -> list[dict]:
-        """Build a mock Prometheus range_query return value."""
+        """Build a mock Prometheus range_query return value.
+
+        Uses recent timestamps (relative to now) so that stale/sparse
+        data detection in query_metrics doesn't false-trigger on test data.
+        """
+        import time
+
+        now = int(time.time())
+        # Place values at 15s intervals ending at "now"
+        start = now - (len(values) - 1) * 15
         return [
             {
                 "metric": {"service": "frontend"},
-                "values": [[1704067200 + i * 15, str(v)] for i, v in enumerate(values)],
+                "values": [[start + i * 15, str(v)] for i, v in enumerate(values)],
             }
         ]
 
@@ -139,7 +148,9 @@ class TestQueryMetrics:
     def test_anomalous_flag_false(self, mock_cls: MagicMock) -> None:
         from src.agent.tools.query_metrics import query_metrics
 
-        values = [1.0, 1.1, 0.9, 1.0, 1.05]
+        # Use enough data points to exceed 90% coverage for a 30-min window
+        # (expected ~120 points at 15s interval). 115 points = 96% coverage.
+        values = [1.0 + 0.01 * (i % 10) for i in range(115)]
         mock_instance = mock_cls.return_value
         mock_instance.range_query.return_value = self._mock_range_response(values)
         result = query_metrics.invoke({"service_name": "frontend", "metric_name": "cpu_usage"})
