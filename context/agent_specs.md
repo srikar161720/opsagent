@@ -77,53 +77,53 @@ The agent implements a **structured ReAct loop** (not a free-form chat agent) us
 START (Alert Input)
       │
       ▼
-┌─────────────────────────────┐
+┌──────────────────────────────┐
 │       analyze_context        │
 │ • Parse alert payload        │
 │ • Call get_topology tool     │
 │ • Set initial affected_svcs  │
 │ • tool_calls_remaining = 10  │
-└──────────────┬──────────────┘
+└──────────────┬───────────────┘
                │
                ▼
-┌─────────────────────────────┐◀──────────────┐
+┌──────────────────────────────┐◀──────────────┐
 │       form_hypothesis        │               │
 │ • LLM reasons over topology  │               │
 │ • Ranks suspect services     │               │
 │ • Populates hypotheses[]     │               │
-└──────────────┬──────────────┘               │
-               │                              │
-               ▼                              │
-┌─────────────────────────────┐               │
+└──────────────┬───────────────┘               │
+               │                               │
+               ▼                               │
+┌──────────────────────────────┐               │
 │       gather_evidence        │               │
 │ • query_metrics              │               │
 │ • search_logs                │               │
 │ • search_runbooks            │               │
 │ • Decrements tool count      │               │
-└──────────────┬──────────────┘               │
-               │                              │
-               ▼                              │
-┌─────────────────────────────┐               │
+└──────────────┬───────────────┘               │
+               │                               │
+               ▼                               │
+┌──────────────────────────────┐               │
 │     analyze_causation        │               │
 │ • discover_causation tool    │               │
 │ • Updates causal_graph       │               │
 │ • Updates root_cause         │               │
-└──────────────┬──────────────┘               │
-               │                              │
-               ▼                              │
-┌─────────────────────────────┐               │
+└──────────────┬───────────────┘               │
+               │                               │
+               ▼                               │
+┌──────────────────────────────┐               │
 │       should_continue?       │──(Yes)────────┘
 │ • confidence ≥ 0.7?          │   (refine hypotheses with
 │ • tool_calls_remaining == 0? │    new causal evidence)
-└──────────────┬──────────────┘
+└──────────────┬───────────────┘
                │ No (stop condition met)
                ▼
-┌─────────────────────────────┐
+┌──────────────────────────────┐
 │       generate_report        │
 │ • Format RCA_REPORT_TEMPLATE │
 │ • Populate all sections      │
 │ • Set rca_report in state    │
-└──────────────┬──────────────┘
+└──────────────┬───────────────┘
                │
               END
 ```
@@ -415,15 +415,21 @@ def discover_causation(
 
 ## 4. Available Metrics Reference
 
-| Metric Name | Description | Unit | PromQL Pattern |
-|---|---|---|---|
-| `latency_p50` | Median request latency | ms | `histogram_quantile(0.5, ...)` |
-| `latency_p99` | 99th percentile latency | ms | `histogram_quantile(0.99, ...)` |
-| `error_rate` | Errors / total requests | ratio 0–1 | `rate(errors[1m]) / rate(total[1m])` |
-| `request_count` | Total requests | count | `rate(http_requests_total[1m])` |
-| `cpu_usage` | CPU utilization | ratio 0–1 | `rate(container_cpu_usage_seconds_total[1m])` |
-| `memory_usage` | Memory utilization | ratio 0–1 | `container_memory_usage_bytes / limit` |
-| `connection_count` | Active connections | count | `db_connections_active` |
+| Metric Name | Description | Unit | Source | PromQL Pattern |
+|---|---|---|---|---|
+| `cpu_usage` | CPU utilization rate | ratio | Docker Stats Exporter | `rate(container_cpu_usage_seconds_total{service="X"}[1m])` |
+| `memory_usage` | Memory working set | bytes | Docker Stats Exporter | `container_memory_working_set_bytes{service="X"}` |
+| `network_rx_bytes_rate` | Network receive rate | bytes/s | Docker Stats Exporter | `rate(container_network_receive_bytes_total[1m])` |
+| `network_tx_bytes_rate` | Network transmit rate | bytes/s | Docker Stats Exporter | `rate(container_network_transmit_bytes_total[1m])` |
+| `network_rx_errors_rate` | Network receive errors | errors/s | Docker Stats Exporter | `rate(container_network_receive_errors_total[1m])` |
+| `network_tx_errors_rate` | Network transmit errors | errors/s | Docker Stats Exporter | `rate(container_network_transmit_errors_total[1m])` |
+| `request_rate` | Request rate per service | calls/s | OTel Collector spanmetrics | `sum(rate(span_calls_total{service_name="X"}[1m]))` |
+| `error_rate` | Error span rate | errors/s | OTel Collector spanmetrics | `sum(rate(span_calls_total{status_code="STATUS_CODE_ERROR"}[1m]))` |
+| `latency_p99` | 99th percentile latency | ms | OTel Collector spanmetrics | `histogram_quantile(0.99, rate(span_duration_milliseconds_bucket[1m]))` |
+| `probe_up` | Service reachability (1=up, 0=down) | gauge | Service Probe Exporter | `service_probe_up{service="X"}` |
+| `probe_latency` | TCP/HTTP response time | seconds | Service Probe Exporter | `service_probe_duration_seconds{service="X"}` |
+
+> **Availability caveats:** Container-level metrics available for all 7 services. Application-level metrics (request_rate, error_rate, latency_p99) only for trace-exporting services: frontend, checkoutservice, productcatalogservice, paymentservice, loadgenerator. cartservice (.NET), currencyservice (C++), and redis do NOT export traces in OTel Demo v1.10.0. Probe metrics available for all 7 services via direct TCP/HTTP probing.
 
 ---
 

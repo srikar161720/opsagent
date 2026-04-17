@@ -43,7 +43,7 @@ OpsAgent is evaluated across three independent tracks that collectively answer d
 
 | Week | Activities |
 |---|---|
-| Week 9 | Implement fault injection scripts; run all 40 OTel Demo tests (8 fault types × 5 runs, Days 1–4); false positive test under 24h normal operation (Day 5); evaluate 3 internal baselines |
+| Week 9 | Implement fault injection scripts; run all 40 OTel Demo tests (8 fault types × 5 runs, single-day execution ~3.5-4 hours); evaluate 3 internal baselines |
 | Week 10 Days 1–2 | Run OpsAgent against RCAEval RE1 (375 cases), RE2 (271 cases), RE3 (90 cases) |
 | Week 10 Days 3–5 | Calculate all metrics; manually score 25–30 RCA reports; create Visualizations 1–9; run statistical analysis; draft `docs/evaluation_results.md`; *(nice-to-have: run HDFS benchmark + Visualizations 10–11 if time permits)* |
 
@@ -56,7 +56,7 @@ OpsAgent is evaluated across three independent tracks that collectively answer d
 | Fault | Target | Ground Truth | Difficulty | Detection Target |
 |---|---|---|---|---|
 | service_crash | cartservice | cartservice | Easy | < 30 s |
-| high_latency | paymentservice | paymentservice | Easy | < 60 s |
+| high_latency | frontend | frontend | Easy | < 60 s |
 | memory_pressure | checkoutservice | checkoutservice | Medium | < 120 s |
 | cpu_throttling | productcatalogservice | productcatalogservice | Medium | < 120 s |
 | connection_exhaustion | redis | redis | Medium | < 90 s |
@@ -64,18 +64,25 @@ OpsAgent is evaluated across three independent tracks that collectively answer d
 | cascading_failure | cartservice | cartservice | **Hard** | < 60 s |
 | config_error | currencyservice | currencyservice | **Hard** | < 30 s |
 
+> **Note (Session 11):** `high_latency` target changed from `paymentservice` to `frontend` because the loadgenerator only sends traffic to frontend; 500ms latency on paymentservice was invisible since no requests reached it. `connection_exhaustion` method changed from `redis-cli CONFIG SET maxclients 5` to `docker pause redis` — pause produces detectable probe_up=0 signal. `network_partition` method changed from `docker network disconnect` to `docker pause paymentservice` for the same reason.
+
 > **Key RCA challenge:** `cascading_failure` is the hardest case — multiple downstream services degrade sequentially, but the root cause is always the single upstream service that failed first. This is where causal discovery (PC algorithm) differentiates OpsAgent from symptom-chasing baselines.
 
 ### 2.2 Test Schedule
 
-| Day | Fault Types | Runs Each | Tests |
-|---|---|---|---|
-| Day 1 | service_crash, high_latency | 5 | 10 |
-| Day 2 | memory_pressure, cpu_throttling | 5 | 10 |
-| Day 3 | connection_exhaustion, network_partition | 5 | 10 |
-| Day 4 | cascading_failure, config_error | 5 | 10 |
-| Day 5 | **False positive test** (24h normal operation) | — | — |
-| **Total** | 8 types | 5 each | **40 tests** |
+All 40 tests are run in a single session (~3.5-4 hours), ordered from easy to hard:
+
+| Batch | Fault Types | Runs Each | Tests | Est. Time |
+|---|---|---|---|---|
+| 1 | service_crash, high_latency | 5 | 10 | ~50 min |
+| 2 | memory_pressure, cpu_throttling | 5 | 10 | ~65 min |
+| 3 | connection_exhaustion, network_partition | 5 | 10 | ~55 min |
+| 4 | cascading_failure, config_error | 5 | 10 | ~65 min |
+| **Total** | 8 types | 5 each | **40 tests** | **~4 hours** |
+
+**False positive test (separate):** Run the system under 24h normal operation (no faults) and count any alerts fired. This provides the `false_positives` count for the Precision metric. Can be run before or after the 40 fault injection tests — it does not block them.
+
+**Per-test timing:** ~60s wait (for fault to manifest in metrics) + ~15-30s investigation + ~15-30s restore + cooldown (120-240s per fault type from `evaluation_scenarios.yaml`).
 
 **Cooldown between tests:** Per-fault, as defined in `configs/evaluation_scenarios.yaml` (120–240 seconds). Cascading failures use the longest cooldown (240s) to allow full downstream recovery; simple crashes use the shortest (120s). The `_load_per_fault_cooldowns()` helper in the test runner reads these values automatically.
 

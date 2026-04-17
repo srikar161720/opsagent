@@ -1,9 +1,11 @@
 # Infrastructure & Serving Specifications
 
 **Implementation files:**
-- `docker-compose.yml` — Main monitoring + message queue stack + Docker Stats Exporter + Promtail
-- `demo_app/docker-compose.demo.yml` — OTel Demo microservices (reduced, with dummy SHIPPING/EMAIL env vars for checkoutservice)
-- `infrastructure/prometheus/prometheus.yml` — Prometheus scrape config
+- `docker-compose.yml` — Main monitoring + message queue stack + Docker Stats Exporter + Promtail + OTel Collector + Service Probe Exporter
+- `demo_app/docker-compose.demo.yml` — OTel Demo microservices (reduced, v1.10.0 images, with OTEL_EXPORTER_OTLP_ENDPOINT env vars and dummy SHIPPING/EMAIL env vars for checkoutservice)
+- `infrastructure/prometheus/prometheus.yml` — Prometheus scrape config (scrapes docker-stats-exporter, otel-collector, service-probe-exporter)
+- `infrastructure/otel-collector/otel-collector-config.yaml` — OTel Collector config with `spanmetrics` connector (traces → metrics) and Prometheus exporter on port 9464
+- `infrastructure/service_probe_exporter/probe_exporter.py` — Custom Python exporter that probes each service via application-level data exchange (Redis PING, HTTP GET, gRPC payload), exposes `service_probe_up` and `service_probe_duration_seconds` on port 9102
 - `infrastructure/promtail/promtail-config.yml` — Promtail Docker SD config (ships container logs to Loki via Docker socket)
 - `infrastructure/loki/loki-config.yml` — Loki storage config
 - `infrastructure/grafana/provisioning/datasources/datasources.yml` — Grafana datasources
@@ -24,6 +26,10 @@
 | Loki | 3100 | http://localhost:3100 |
 | Kafka | 9092 | localhost:9092 |
 | Docker Stats Exporter | 9101 | http://localhost:9101 |
+| OTel Collector (OTLP gRPC) | 4317 | grpc://localhost:4317 |
+| OTel Collector (OTLP HTTP) | 4318 | http://localhost:4318 |
+| OTel Collector (Prometheus exporter) | 9464 | http://localhost:9464 |
+| Service Probe Exporter | 9102 | http://localhost:9102 |
 | OpsAgent API | 8000 | http://localhost:8000 |
 | Streamlit Dashboard | 8501 | http://localhost:8501 |
 

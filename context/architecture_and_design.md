@@ -140,19 +140,19 @@ The target microservice system is the OpenTelemetry Astronomy Shop, reduced to 6
                     └────┬─────┘
            ┌─────────────┼──────────────┬──────────────┐
            ▼             ▼              ▼              ▼
-    ┌───────────┐   ┌─────────┐  ┌────────────┐  ┌──────────────┐
-    │cartservice│   │currency │  │  product   │  │  checkout    │
-    │  :7070    │   │ service │  │  catalog   │  │  service     │
-    └─────┬─────┘   │  :7001  │  │ svc :3550  │  │  :5050       │
-          │         └─────────┘  └────────────┘  └──────┬───────┘
-          ▼                                             ├──────────────┐
-      ┌───────┐                                         ▼              ▼
-      │ redis │                               ┌────────────┐    ┌──────────┐
-      │ :6379 │                               │  payment   │    │ (cart,   │
-      └───────┘                               │  service   │    │  catalog,│
-                                              │  :50051    │    │  currency│
-                                              └────────────┘    │  again)  │
-                                                                └──────────┘
+    ┌───────────┐   ┌─────────┐  ┌────────────┐  ┌────────────┐
+    │cartservice│   │currency │  │  product   │  │  checkout  │
+    │  :7070    │   │ service │  │  catalog   │  │  service   │
+    └─────┬─────┘   │  :7001  │  │ svc :3550  │  │  :5050     │
+          │         └─────────┘  └────────────┘  └─────┬──────┘
+          ▼                                            ├──────────────┐
+      ┌───────┐                                        ▼              ▼
+      │ redis │                              ┌────────────┐    ┌───────────┐
+      │ :6379 │                              │  payment   │    │ (cart,    │
+      └───────┘                              │  service   │    │  catalog, │
+	                                         │  :50051    │    │  currency │
+                                             └────────────┘    │  again)   │
+                                                               └───────────┘
 ```
 
 **Excluded OTel Demo services** (not deployed to save ~2GB RAM):
@@ -264,17 +264,17 @@ Every significant choice is recorded here with the rationale, so the same ground
 
 ### Out-of-Scope (explicitly excluded)
 
-| Component | Reason |
-|---|---|
-| Kubernetes | 16GB RAM constraint; adds complexity without core value |
-| Elasticsearch + Kibana (ELK) | Replaced by Loki; would consume 4–6GB RAM |
-| Slack Bot integration | Not core value; per initial scope decision |
-| MLflow experiment tracking | Manual tracking sufficient for timeline |
-| `check_deployments` tool | Not relevant without a CI/CD system |
-| `find_similar_incidents` tool | Nice-to-have; cut for timeline |
-| Chaos Mesh | Requires Kubernetes |
-| AIOps Challenge dataset | Less aligned with causal RCA; scope creep |
-| GAIA dataset | Fewer labeled cases than RCAEval; scope creep |
+| Component                     | Reason                                                  |
+| ----------------------------- | ------------------------------------------------------- |
+| Kubernetes                    | 16GB RAM constraint; adds complexity without core value |
+| Elasticsearch + Kibana (ELK)  | Replaced by Loki; would consume 4–6GB RAM               |
+| Slack Bot integration         | Not core value; per initial scope decision              |
+| MLflow experiment tracking    | Manual tracking sufficient for timeline                 |
+| `check_deployments` tool      | Not relevant without a CI/CD system                     |
+| `find_similar_incidents` tool | Nice-to-have; cut for timeline                          |
+| Chaos Mesh                    | Requires Kubernetes                                     |
+| AIOps Challenge dataset       | Less aligned with causal RCA; scope creep               |
+| GAIA dataset                  | Fewer labeled cases than RCAEval; scope creep           |
 
 ---
 

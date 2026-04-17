@@ -154,7 +154,7 @@
 - [x] `src/agent/__init__.py` — package exports (`AgentExecutor`, `AgentState`)
 - [x] `notebooks/07_agent_prototyping.ipynb` — 7-section notebook: setup, individual tool testing, graph compilation, routing logic, executor setup, full investigation, report inspection
 - [x] `scripts/run_agent_demo.py` — CLI demo script with prerequisite checks, live/offline modes, formatted output
-- [ ] End-to-end agent test with manually injected fault — produces valid RCA report (demo tested live; full fault injection deferred to Phase 5)
+- [x] End-to-end agent test with manually injected fault — produces valid RCA report (verified in Session 10 via `service_crash` fault injection; cartservice correctly identified as root cause)
 - [ ] Advisor check-in completed (Week 8) — show HDFS pretraining curves + working agent demo
 
 ### Unit Tests
@@ -166,6 +166,10 @@
 - [x] `tests/unit/test_agent_state.py` — 5 tests: TypedDict structure, add_messages annotation, field completeness, construction, type hints
 - [x] `tests/unit/test_agent_graph.py` — 12 tests: BuildGraph (2), ShouldContinue (5), AnalyzeContextNode (2), HelperFunctions (3)
 - [x] `tests/unit/test_agent_executor.py` — 10 tests: Init (2), Investigate (4), FormatAlert (2), ExtractTop3 (3) — note: one test was removed by linter (9 remaining)
+- [x] `tests/unit/test_metrics_calculator.py` — 30 tests: RecallAt1 (4), RecallAt3 (4), Precision (4), DetectionLatency (2), MttrProxy (3), ConfidenceInterval (3), LoadResults (3), CalculateMetrics (7)
+- [x] `tests/unit/test_fault_injection_suite.py` — 20 tests: FaultScripts (5), ResolveScript (2), RunFaultInjection (8), LoadPerFaultCooldowns (4) — all subprocess/agent calls mocked
+- [x] `tests/unit/test_baseline_comparison.py` — 17 tests: RuleBasedBaseline (5), ADOnlyBaseline (5), LLMWithoutToolsBaseline (5), RunAllBaselines (3) — all external services mocked
+- [x] `tests/unit/test_inject_faults.py` — 8 tests: PreflightChecks (5), PrintSummary (3) — Docker/Prometheus/Loki/API key checks mocked
 - [x] `tests/integration/test_data_pipeline.py` — 7 tests: PrometheusIntegration (2), LokiIntegration (2), TopologyIntegration (2), FullPipeline (1). `@pytest.mark.integration`
 - [x] `tests/integration/test_agent_workflow.py` — 8 tests: GraphCompilation (1), ToolInvocation (3), EndToEndInvestigation (3, requires GEMINI_API_KEY). `@pytest.mark.integration`
 
@@ -183,12 +187,17 @@
 **Goal:** Run fault injection tests, RCAEval cross-system evaluation, calculate all metrics and visualizations. See `context/evaluation_strategy.md` for full evaluation details.
 
 ### Fault Injection Evaluation (Week 9)
-- [ ] Create all 8 fault injection bash scripts in `demo_app/fault_scenarios/`
-- [ ] Create `scripts/inject_faults.py` — automated fault injection coordinator
-- [ ] Create `tests/evaluation/fault_injection_suite.py`
-- [ ] Create `tests/evaluation/metrics_calculator.py` — Recall@1, Recall@3, Precision, Detection Latency, MTTR Proxy, F1
+- [x] Create all 8 fault injection bash scripts in `demo_app/fault_scenarios/`
+- [x] Create `scripts/inject_faults.py` — automated fault injection coordinator with preflight checks, summary output
+- [x] Create `tests/evaluation/fault_injection_suite.py` — automated runner with inject → wait → investigate → save → restore pipeline
+- [x] Create `tests/evaluation/metrics_calculator.py` — `EvaluationResults` dataclass, Recall@1, Recall@3, Precision, Detection Latency, MTTR Proxy, confidence intervals
+- [x] Create `tests/evaluation/baseline_comparison.py` — 3 internal baselines: `RuleBasedBaseline`, `ADOnlyBaseline`, `LLMWithoutToolsBaseline`
+- [x] Create `tests/unit/test_metrics_calculator.py` — 30 tests across 8 classes
+- [x] Create `tests/unit/test_fault_injection_suite.py` — 20 tests across 4 classes
+- [x] Create `tests/unit/test_baseline_comparison.py` — 17 tests across 4 classes
+- [x] Create `tests/unit/test_inject_faults.py` — 8 tests across 2 classes
+- [x] End-to-end single-fault test verified: `service_crash` → Recall@1=100%, Recall@3=100%, MTTR=15.3s
 - [ ] Run 40 OTel Demo fault injection tests (8 fault types × 5 runs); save results to `data/evaluation/results/`
-- [ ] Create `tests/evaluation/baseline_comparison.py`
 - [ ] Evaluate 3 internal baselines: Rule-Based, AD-Only, LLM-Without-Tools
 
 ### RCAEval Cross-System Evaluation (Week 10, Days 1–2)
@@ -780,3 +789,184 @@
 - The system prompt explicitly lists the 6 available metrics from Docker Stats Exporter. The original spec's 7 metrics (latency_p50/p99, error_rate, request_count, connection_count) are application-level metrics not available from container monitoring — only cpu_usage, memory_usage, and network_rx/tx_bytes/errors_rate are exposed.
 - Context7 was used to verify LangGraph `StateGraph` API (TypedDict state, `add_messages` reducer, `START`/`END` constants, `add_conditional_edges`), `ChatGoogleGenerativeAI` tool binding, and `ToolMessage` construction patterns.
 - 181 total unit tests passing (119 existing + 62 new). All ruff lint clean. mypy 0 errors on `src/agent/` (13 files).
+
+---
+
+### 2026-04-06 — Session 10
+
+**Phase:** Phase 5 — Evaluation (Week 9 Fault Injection Evaluation)
+**Duration:** ~5 hours
+
+**Completed:**
+
+*Evaluation Framework (12 new files):*
+- Created `tests/evaluation/metrics_calculator.py` — `EvaluationResults` dataclass, `load_results()`, `recall_at_1()`, `recall_at_3()`, `precision()`, `detection_latency()`, `mttr_proxy()`, `confidence_interval()` (t-distribution), `calculate_metrics()` orchestrator with per-fault breakdowns. Uses `datetime.fromisoformat()` for timestamp parsing (compatible with `datetime.now().isoformat()` output)
+- Created `tests/evaluation/fault_injection_suite.py` — `FAULT_SCRIPTS` (8 entries), `GROUND_TRUTH` (8 entries), `run_fault_injection()` (inject → 60s wait → investigate → save JSON + RCA report → restore), `_load_per_fault_cooldowns()`, `main()` with argparse (`--fault`, `--repetitions`, `--output`, `--cooldown`, `--max-wait`)
+- Created `tests/evaluation/baseline_comparison.py` — `RuleBasedBaseline` (static CPU/memory thresholds), `ADOnlyBaseline` (LSTM-AE reconstruction error ranking), `LLMWithoutToolsBaseline` (Gemini without tool bindings, `_parse_response()` for service name extraction), `run_all_baselines()` orchestrator
+- Created `scripts/inject_faults.py` — user-facing coordinator with `preflight_checks()` (Docker, GEMINI_API_KEY, Prometheus, Loki, demo services, fault scripts), `print_summary()`, argparse with `--skip-preflight` and `--summary-only` flags
+
+*8 Fault Injection Bash Scripts in `demo_app/fault_scenarios/`:*
+- `01_service_crash.sh` — `docker compose stop/start cartservice`
+- `02_high_latency.sh` — sidecar container sharing paymentservice network namespace, Alpine + iproute2 + `tc netem delay 500ms` (sidecar approach because OTel Demo images are distroless with no package manager)
+- `03_memory_pressure.sh` — `docker update --memory 128m` checkoutservice (default 256M from compose)
+- `04_cpu_throttling.sh` — `docker update --cpus 0.1` productcatalogservice; restore via `docker compose up -d --force-recreate` (because `docker update --cpus` sets NanoCpus which can't be cleared via `docker update`)
+- `05_connection_exhaustion.sh` — `redis-cli CONFIG SET maxclients 5/10000`
+- `06_network_partition.sh` — `docker network disconnect/connect opsagent_opsagent-net`
+- `07_cascading_failure.sh` — crash cartservice + 30s propagation wait
+- `08_config_error.sh` — stop currencyservice, `docker run` replacement with invalid `CURRENCY_DATA_FILE` env var, restore via stop+rm+start
+
+*75 New Unit Tests (4 test files):*
+- `tests/unit/test_metrics_calculator.py` — 30 tests: RecallAt1 (4), RecallAt3 (4), Precision (4), DetectionLatency (2), MttrProxy (3), ConfidenceInterval (3), LoadResults (3), CalculateMetrics (7)
+- `tests/unit/test_fault_injection_suite.py` — 20 tests: FaultScripts (5), ResolveScript (2), RunFaultInjection (8), LoadPerFaultCooldowns (4)
+- `tests/unit/test_baseline_comparison.py` — 17 tests: RuleBasedBaseline (5), ADOnlyBaseline (5), LLMWithoutToolsBaseline (5), RunAllBaselines (3)
+- `tests/unit/test_inject_faults.py` — 8 tests: PreflightChecks (5), PrintSummary (3)
+
+*Critical Bug Fixes to Agent Pipeline (discovered during live testing):*
+- **`discover_causation.py` — singular matrix fix:** Added zero-variance column dropping, highly-correlated column dropping (r > 0.999 via `_drop_correlated_columns()`), and tiny jitter (`np.random.default_rng(42)`, scale 1e-8) before passing data to PC algorithm. Fisher's Z test crashes with `LinAlgError: Singular matrix` when columns are constant or perfectly correlated (common with network_rx/tx_errors_rate = 0 and lagged copies of slow-changing metrics)
+- **`discover_causation.py` — service cap:** Hard-capped at 5 services to prevent combinatorial explosion (7 services × 4 metrics × 3 lag levels = 84 columns → PC takes 30+ minutes even at depth 3)
+- **`discover_causation.py` — reduced lags:** Changed from `lags=[1, 2, 5]` to `lags=[1, 2]` to reduce column count. Lag 5 added many columns with minimal causal benefit for short-lived faults
+- **`discover_causation.py` — depth 3:** Set `max_conditioning_set=3` (was 4). Depth 4 tested but produced worse results — more aggressive edge pruning removed weak signal from crashed services while strengthening spurious signals from healthy services
+- **`query_metrics.py` — stale/sparse data detection:** Added detection of crashed/down services via two signals: (1) stale data (last data point >90s old), (2) sparse data (<70% of expected data points for the time range). Returns `anomalous: True` with `CRITICAL` note when either triggers. Previously, a crashed service returned stale cached data that looked "normal" (`anomalous: False`), so the agent couldn't distinguish dead services from healthy ones
+- **`query_metrics.py` — no-data CRITICAL signal:** When `query_metrics` returns zero data points, it now returns `anomalous: True` with explicit "service is DOWN, CRASHED, or UNREACHABLE" message (previously returned `anomalous: False` with bland note)
+- **`graph.py` — hypothesis override for low-confidence causal results:** When PC algorithm returns confidence <50% or "inconclusive" (common when root cause service is down and invisible to PC), the agent now checks LLM hypotheses and evidence for CRITICAL signals. A service flagged CRITICAL by `query_metrics` (no data or sparse data) gets boosted to at least 70% confidence. This prevents the PC algorithm from overriding correct LLM hypotheses with weak causal signals from surviving services
+- **`graph.py` — 10-minute causal discovery window:** Changed from 30-minute to 10-minute query window for causal discovery, increasing anomaly-to-baseline ratio (4/40 fault data points vs 4/120)
+- **`fault_injection_suite.py` — 60s pre-investigation wait:** Changed from 10s to 60s wait before triggering investigation, allowing ~4 Prometheus scrape cycles of anomalous data for stronger PC algorithm signal
+- **`fault_injection_suite.py` — neutral alert title:** Changed from `"Fault Injection Evaluation — {fault_type}"` to `"Anomaly Detected — Automated Investigation Triggered"` to prevent LLM from reading the fault type hint and to prevent it from blaming "Fault Injection System" as root cause
+- **`fault_injection_suite.py` — affected_services in alert:** Added all 7 services to alert's `affected_services` list so agent knows which services to investigate (previously empty, causing agent to investigate blind)
+- **`04_cpu_throttling.sh` — restore via recreate:** `docker update --cpus 0` doesn't reset NanoCpus. `docker update --cpu-quota=-1` fails with "Conflicting options: CPU Period cannot be updated as NanoCPUs has already been set". Fixed restore to use `docker compose up -d --force-recreate productcatalogservice`
+- **`02_high_latency.sh` — sidecar approach:** OTel Demo paymentservice image is distroless (no `apt-get`, no `apk`, no `tc`). Replaced in-container `tc` with a lightweight Alpine sidecar sharing paymentservice's network namespace (`--network container:demo_app-paymentservice-1`, `--cap-add NET_ADMIN`)
+
+*End-to-End Verification:*
+- Successfully ran `service_crash` fault injection test: Recall@1=100%, Recall@3=100%, MTTR=15.3s, detection latency=60.4s, investigation duration=15.3s
+- All 256 unit tests passing (181 existing + 75 new). All ruff lint clean
+
+**In Progress:**
+- 40 fault injection tests not yet run (all 8 fault types × 5 runs planned for single-day execution in next session)
+- 3 internal baseline evaluations not yet run
+
+**Blockers / Issues:**
+- **OTel Demo images are distroless (no package manager):** `02_high_latency.sh` originally tried to run `tc` inside the paymentservice container, but the image has no `apt-get`, `apk`, or `tc`. **Resolution:** Used Alpine sidecar container sharing paymentservice's network namespace (`--network container:...`). The sidecar installs `iproute2` and runs `tc netem` on the shared `eth0`.
+- **`docker update --cpus 0` doesn't reset NanoCpus on macOS Docker Desktop:** Once `--cpus` sets `NanoCpus`, it can't be cleared via `docker update`. Even `--cpu-quota=-1` fails with "Conflicting options". **Resolution:** Restore via `docker compose up -d --force-recreate productcatalogservice` which recreates the container from compose (no CPU limit defined).
+- **Gemini API free tier quota (20 requests/day):** The agent makes 4-5 LLM calls per investigation. Free tier's 20/day limit was exhausted during iterative testing. **Resolution:** Upgraded to Gemini paid tier.
+- **PC algorithm singular matrix error:** Fisher's Z test in causal-learn crashes with `LinAlgError: Singular matrix` when the correlation matrix has zero-variance or perfectly-correlated columns. Network error rates are zero during normal operation, and lagged copies of slow-changing metrics (memory) are nearly identical. **Resolution:** Three-layer defense: (1) drop zero-variance columns (var < 1e-12), (2) drop perfectly correlated columns (|r| > 0.999), (3) add tiny jitter (1e-8 normal noise).
+- **Prometheus serves stale cached metrics for stopped containers:** When cartservice is crashed (`docker compose stop`), Prometheus continues to serve data from the `rate()` lookback window. The `query_metrics` tool returned `anomalous: False` for a dead service because the cached data looked normal. **Resolution:** Added sparse data detection — if the number of returned data points is <70% of expected (based on scrape interval and time range), the service is flagged CRITICAL.
+- **PC algorithm can't see crashed services:** A stopped service produces no new metrics, so the PC algorithm only analyzes surviving services and attributes blame to whichever shows the most variance (usually redis). **Resolution:** Combined approach: (1) LLM hypotheses detect the CRITICAL/sparse signal from `query_metrics`, (2) `analyze_causation_node` overrides low-confidence PC results with the LLM's top hypothesis when CRITICAL evidence is present.
+- **Alert title leaked test metadata to LLM:** The original alert title `"Fault Injection Evaluation — service_crash"` caused the LLM to blame "Fault Injection System" as root cause instead of a real service. **Resolution:** Changed to neutral `"Anomaly Detected — Automated Investigation Triggered"`.
+- **Depth 3 vs Depth 4 for PC algorithm:** Tested both. Depth 4 produced worse Recall@1 (0% vs 100%) for service_crash because deeper conditioning pruned away weak crashed-service signals while strengthening spurious healthy-service signals. **Resolution:** Locked at `max_conditioning_set=3`.
+
+**Next Session:**
+- Run all 40 fault injection tests in a single session (8 fault types × 5 runs, ~3.5-4 hours total)
+- Run 3 internal baseline evaluations (rule-based, AD-only, LLM-without-tools)
+- Begin Week 10 tasks if time permits
+
+**Notes:**
+- The evaluation testing schedule was changed from 4 days (10 tests/day) to a single-day run (~3.5-4 hours). Per-test time: ~60s wait + ~15-30s investigation + ~15-30s restore + cooldown (120-240s) ≈ 4-6 minutes per test.
+- The `discover_causation` tool now uses `lags=[1, 2]` (was `[1, 2, 5]`) and `max_conditioning_set=3` (was 4). With the 5-service cap, this produces ~30-50 columns after zero-variance and correlation filtering — PC completes in <1 second.
+- The `analyze_causation_node` in `graph.py` now implements a hybrid root cause determination: if PC algorithm confidence ≥50%, use its result; otherwise, check if the LLM's top hypothesis has CRITICAL evidence (stale/sparse metrics indicating a down service) and override. This is critical for service crash scenarios where the root cause service is invisible to PC.
+- The `query_metrics` tool's sparse data detection uses 70% coverage threshold (data points / expected points based on 15s scrape interval). For a 10-minute window, expected is ~40 points. A service that crashed 60s ago will have ~36 points (90% coverage, above threshold). But with `rate()` which needs 2 consecutive scrapes, the effective gap is larger — coverage typically drops below 70% within 60-90s of a crash.
+- All 8 bash scripts tested manually: inject → verify effect → restore. All work correctly on macOS Docker Desktop.
+- 256 total unit tests passing (181 existing + 75 new). All ruff lint clean.
+
+---
+
+### 2026-04-16 — Session 11
+
+**Phase:** Phase 5 — Evaluation (Week 9 — Iterative Debugging of 40-Test Fault Injection Suite)
+**Duration:** ~14 hours (multi-day iterative debugging with 7 full 40-test runs)
+
+**Completed:**
+
+*Ran 7 full 40-test fault injection evaluation rounds with iterative fixes. Recall@1 progression:*
+- Run 1 (initial): **10.0% (4/40)** — baseline with Phase A fixes + OTel Collector
+- Run 2: 17.5% (7/40) — after hypothesis parsing, confidence calibration, fault script improvements
+- Run 3: **25.0% (10/40)** — after application metrics added (OTel Collector + spanmetrics)
+- Run 4: 22.5% (9/40) — after fixing false CRITICAL from application metrics on non-trace services
+- Run 5: 22.5% (9/40) — after 120s wait, 70% sparse threshold, frozen detection, high_latency target change
+- Run 6: 15.0% (6/40) — after Service Probe Exporter added
+- Run 7: **27.5% (11/40)** — after probe_up CRITICAL check + Redis deprioritization (new best, tied with Run 3)
+- Recall@3 best: 52.5% (Run 6)
+
+*Evaluation Framework Enhancements:*
+- **Pre-investigation wait increased to 120s** (was 60s): `fault_injection_suite.py`. The `rate()` function's `[1m]` lookback window persists data for ~75s after a service stops. At 60s wait, crashed services still show 100% data coverage; at 120s, coverage drops to ~65% triggering 70% sparse CRITICAL threshold
+- **Sparse threshold lowered to 70%** (was 90%): `query_metrics.py`. The 90% threshold triggered false CRITICAL on healthy services with minor scrape jitter. At 70%, only services losing 30%+ of data trigger CRITICAL
+- **Frozen-metric detection added**: `query_metrics.py`. When 5+ of last 8 rate-metric values are 0.0 AND historical mean > 0.0001, flags CRITICAL. Catches paused containers where Docker Stats Exporter still reports stats but CPU rate goes flat. `had_activity` guard prevents false triggers on naturally idle services (currencyservice)
+- **high_latency target changed** from paymentservice to frontend: `demo_app/fault_scenarios/02_high_latency.sh`, `GROUND_TRUTH`, `configs/evaluation_scenarios.yaml`. Loadgenerator sends traffic to frontend, not paymentservice. Frontend latency becomes directly visible as probe_latency spikes 60x (0.017s → 1.0s)
+
+*OTel Collector + Application Metrics (Run 3):*
+- Created `infrastructure/otel-collector/otel-collector-config.yaml` with `spanmetrics` connector: derives request rate, error rate, and latency histograms from trace spans. Uses OTLP receivers (gRPC:4317, HTTP:4318) and Prometheus exporter (port 9464)
+- Added `otel-collector` service to `docker-compose.yml` with `otel/opentelemetry-collector-contrib:0.91.0`
+- Added `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317` and `OTEL_SERVICE_NAME=<name>` to all demo services
+- Added Prometheus scrape job for `otel-collector:9464`
+- Added `latency_p99`, `error_rate`, `request_rate` metrics to `query_metrics.py` `METRIC_PROMQL` dict (uses `service_name` label from OTel resource attributes, not `service` from Docker Stats Exporter)
+- Added application metrics to `discover_causation.py` `_CAUSAL_METRICS` dict
+
+*OTel Demo Image Upgrade (Run 5 → Run 6):*
+- Upgraded OTel Demo services from `1.7.0` to `1.10.0` tags in `demo_app/docker-compose.demo.yml` and `08_config_error.sh`. v1.7.0 service images silently failed to export traces despite proper `OTEL_EXPORTER_OTLP_ENDPOINT` configuration; v1.10.0 has corrected SDK behavior and exports traces successfully for 5 of 7 services (frontend, checkoutservice, productcatalogservice, paymentservice, loadgenerator)
+- v2.x tested but rejected: breaking service name changes (cart vs cartservice) and Redis replaced with Valkey
+- Updated loadgenerator env vars for v1.10.0: `LOCUST_HOST`, `LOCUST_HEADLESS=true`, `LOCUST_USERS`, `LOCUST_SPAWN_RATE` (v1.10.0 uses Playwright by default — required explicit config)
+- v1.10.0 currencyservice crash-loops with SIGSEGV (exit code 139) — creates noisy baseline for config_error tests
+- cartservice in v1.10.0 binds internally to port 8080 (was 7070 in v1.7.0) — probe exporter had to be updated to use port 8080
+
+*Service Probe Exporter (Run 6):*
+- Created `infrastructure/service_probe_exporter/probe_exporter.py` — Python stdlib-only exporter (socket, threading, http.server). Probes all 7 services every 15s via application-level data exchange (Redis PING, HTTP GET, gRPC empty payload). Exposes `service_probe_up` (1/0) and `service_probe_duration_seconds` as Prometheus gauge metrics on port 9102
+- Created `infrastructure/service_probe_exporter/Dockerfile` (Python 3.11-slim, no external dependencies)
+- Added `service-probe-exporter` service to `docker-compose.yml` (64MB memory, port 9102)
+- Added Prometheus scrape job for `service-probe-exporter:9102`
+- Updated `scripts/start_infrastructure.sh` to include service-probe-exporter in startup
+- Added `probe_up` and `probe_latency` metrics to `query_metrics.py` `METRIC_PROMQL` and `discover_causation.py` `_CAUSAL_METRICS`
+- Updated system prompt in `src/agent/prompts/system_prompt.py` with probe metric guidance (prioritize probe_up first)
+- **Critical discovery during live testing:** TCP `connect()` succeeds on paused containers (kernel handles SYN/SYN-ACK even when process is SIGSTOP'd). Updated probe to send application-level data (Redis PING, HTTP GET, gRPC empty payload) and wait for response. Without this, `docker pause` faults were undetectable
+
+*probe_up CRITICAL Fix (Run 7):*
+- **Key discovery from diagnostic analysis of Run 6:** In 27 of 34 wrong predictions, the LLM EXPLICITLY DOCUMENTED that the correct service's probe_up was 0 in its evidence chain, but still predicted a different service (usually redis). The probe_up=0 signal was not triggering the code-level CRITICAL override
+- **Root cause:** probe_up returns a time series `[1,1,1,0,0,0,0,0]`. The 2σ anomaly check computes `abs(0.0 - 0.45) = 0.45 < 2 * 0.497 = 0.99` → anomalous=False. probe_up was in `_app_metrics` exclusion set (to prevent false CRITICAL when probe exporter is down), which also disabled sparse/stale CRITICAL detection. The CRITICAL override in `analyze_causation_node` scans evidence for "CRITICAL" string but probe_up never produced it
+- **Fix:** Added dedicated `probe_up` check in `query_metrics.py`: when 3+ of last 4 values are 0.0 AND mean > 0.1 (service was previously up), returns `anomalous: True` with explicit "CRITICAL: {service} is DOWN" note. This triggers the existing CRITICAL override
+- **Fix:** Added `probe_latency` spike detection: when current > 10x mean AND mean > 0.0001s, returns CRITICAL for severe latency (catches frontend 500ms injection: 1.0s vs 0.017s = 60x)
+
+*Redis Deprioritization (Run 7):*
+- Added explicit guidance to `src/agent/prompts/system_prompt.py` about Redis's naturally high CPU variance. The LLM was defaulting to Redis (~58% of predictions in Run 6) because Redis has the highest natural CPU usage among all services. New guidance: "Elevated redis CPU alone is NOT an anomaly indicator. Only consider redis as root cause if: (1) probe_up shows redis is DOWN, or (2) error logs from downstream services explicitly mention redis connection failures"
+- Result: Redis predictions dropped from 23/40 (Run 6) to 3/40 (Run 7)
+
+*Other Fixes:*
+- **NaN handling in query_metrics.py:** The `latency_p99` PromQL (`histogram_quantile`) returns `NaN` when no histogram buckets exist. Python's `float('nan')` serializes as `NaN` in JSON (invalid JSON), causing Gemini API 400 errors. Added `np.isnan(v)` filter before appending to values list
+- **Application metrics false CRITICAL fix:** cartservice/currencyservice/redis don't export traces, so `error_rate`/`latency_p99` return empty. Original code returned `anomalous=True` with CRITICAL note (assumed service was DOWN). New code: if metric is in `_app_metrics` set, returns `anomalous=False` with "No application metrics available" note instead. Also skip sparse/stale CRITICAL detection for these metrics (spanmetrics have irregular data rates based on traffic, not fixed 15s scrape interval)
+
+*Testing:*
+- 262 total unit tests passing (256 existing + 6 new). All ruff lint clean. All 8 bash scripts pass syntax check
+- Extensive live Docker validation between each test run (spin up stack, inject single fault, observe metric behavior, tear down)
+
+**In Progress:**
+- 40 fault injection tests show Recall@1 plateau at 22-27% across Runs 3-7. Recall@3 improved to 52.5% (Run 6) — correct service often in top 3 but not #1
+- Known issue: cross-test state pollution — 10-min query window contains residual data from previous test's fault, causing false CRITICAL on recovering services
+- Known issue: LLM reasoning inconsistency — agent sees probe_up=0 evidence for correct service but still picks wrong service (27/34 wrong predictions in Run 6 had this pattern before the Run 7 fix)
+
+**Blockers / Issues:**
+- **OTel Demo v1.7.0 doesn't export traces:** Despite `OTEL_EXPORTER_OTLP_ENDPOINT` configured correctly, trace export silently fails for all services. Process-level metrics export fine. **Resolution:** Upgrade to v1.10.0 images (corrected SDK behavior). v1.11.0+ introduces breaking changes (Valkey, service name changes) — stay on v1.10.0.
+- **OTel Demo v1.10.0 currencyservice crashes:** Exit code 139 (SIGSEGV) in crash-loop. **Resolution:** Accepted as known limitation — currencyservice probe_up shows 0 intermittently in baseline, making config_error tests noisier.
+- **cartservice port changed in v1.10.0:** .NET app binds to 8080 internally (was 7070 in v1.7.0). **Resolution:** Updated `probe_exporter.py` SERVICES dict to use port 8080 for cartservice.
+- **TCP connect succeeds on paused containers:** Kernel-level TCP stack handles SYN/SYN-ACK even when process is SIGSTOP'd. Simple TCP connect probes couldn't detect paused services. **Resolution:** Probe exporter now sends application-level data and waits for response (Redis PING, HTTP GET, gRPC empty payload).
+- **`docker pause` doesn't affect Docker Stats Exporter metrics:** Paused containers still report full metrics via Docker API. **Resolution:** Probe exporter bypasses this by directly testing service responsiveness via network.
+- **paymentservice receives no traffic from loadgenerator:** Locust browses frontend catalog but doesn't complete checkout flows. 500ms latency on paymentservice was invisible. **Resolution:** Changed high_latency target to frontend where real traffic flows.
+- **NaN values break Gemini API:** `histogram_quantile` returns NaN for services without histogram buckets, which serializes as invalid JSON. **Resolution:** Filter NaN values in query_metrics.py before appending to result.
+- **False CRITICAL on non-trace services:** cartservice/currencyservice/redis don't export traces, so app metrics query returned CRITICAL ("service is DOWN"). **Resolution:** Added `_app_metrics` exclusion set — returns neutral response instead of CRITICAL.
+- **LLM ignores probe_up=0:** The CRITICAL override scans evidence for "CRITICAL" string, but probe_up=0 didn't produce that signal because (a) 2σ check fails due to high std of 0/1 mix, (b) sparse/stale detection was disabled for probe metrics. **Resolution:** Added dedicated probe_up check that flags CRITICAL when 3+ of last 4 values are 0.0.
+- **Redis over-prediction (23/40 in Run 6):** Redis has highest natural CPU variance, attracting PC algorithm and LLM defaults. **Resolution:** Added explicit system prompt guidance about Redis's high variance being normal.
+- **90% sparse threshold too aggressive:** Healthy services with minor scrape jitter triggered false CRITICAL, especially during cooldown period between tests. **Resolution:** Lowered to 70%.
+- **60s wait insufficient:** `rate()` data persists 75s after crash. Crashed services showed 100% coverage at 60s. **Resolution:** Increased to 120s.
+- **Cross-test state pollution:** 10-min query window contains previous test's fault data. Services restored 60-120s ago still show some zero values. Currently unresolved — would require longer cooldowns or per-test metric snapshotting.
+- **LLM reasoning inconsistency:** Even with correct probe_up=0 signal, Gemini 2.5 Flash Lite sometimes picks different service due to topology-based "upstream must have caused downstream failure" reasoning. Mitigated by code-level CRITICAL override in Run 7.
+- **Gemini API ConnectTimeout:** Transient network timeout broke investigations. **Resolution:** Added `max_retries=3` to `ChatGoogleGenerativeAI` in `_get_llm()`.
+
+**Next Session:**
+- Implement remaining improvements to address cross-test state pollution (longer cooldowns, per-test metric snapshotting)
+- Investigate LLM consistency issues — potentially improve system prompt or add more programmatic override logic
+- Consider running RCAEval cross-system evaluation (Week 10, Days 1-2 tasks)
+- Document final evaluation results in `docs/evaluation_results.md`
+
+**Notes:**
+- The Service Probe Exporter is a significant new infrastructure component. It's a lightweight (64MB) Python service using only stdlib (socket, threading, http.server). Probes via application-level data exchange (Redis PING, HTTP GET, gRPC empty payload) rather than simple TCP connect, which correctly detects paused/frozen services that respond to TCP SYN at the kernel level but can't respond to application requests.
+- OTel Collector spanmetrics connector converts trace spans into Prometheus metrics (`span_calls_total`, `span_duration_milliseconds_bucket`). Only 5 of 7 services export traces successfully: frontend, checkoutservice, productcatalogservice, paymentservice, loadgenerator. cartservice (.NET) and currencyservice (C++) don't export traces in v1.10.0 images. redis has no OTel SDK instrumentation.
+- The probe_up CRITICAL check uses 3/4 recent zeros (not all 4) because the rate() lookback window sometimes leaks non-zero values into the most recent position. The `had_activity` guard (`mean > 0.1`) prevents false triggers on services that are always effectively down (currencyservice crash-loop).
+- Redis deprioritization in system prompt had dramatic effect: false Redis predictions dropped from 23/40 → 3/40. But side effect: cartservice over-prediction emerged in Run 7 (19/40), likely due to cross-test state pollution after service_crash/cascading_failure tests.
+- All 7 test runs used v1.10.0 OTel Demo images (except Run 1 which used v1.7.0 before the trace export issue was discovered).
+- Cross-run trend: Recall@3 improved steadily (32.5% → 47.5% → 52.5%) as the pipeline matured. The correct service is increasingly found in the top 3, but Recall@1 (pick correctly as #1) plateaus around 22-27% due to LLM reasoning inconsistency and cross-test state pollution.
