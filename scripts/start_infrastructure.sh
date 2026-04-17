@@ -10,8 +10,8 @@ cd "$PROJECT_DIR"
 
 echo "=== OpsAgent Infrastructure Startup ==="
 
-echo "[1/4] Starting monitoring stack (Prometheus, Grafana, Loki, Promtail, Kafka, Docker Stats Exporter)..."
-docker compose up -d --build prometheus grafana loki promtail zookeeper kafka docker-stats-exporter
+echo "[1/4] Starting monitoring stack (Prometheus, Grafana, Loki, Promtail, Kafka, Docker Stats Exporter, OTel Collector, Service Probe Exporter)..."
+docker compose up -d --build prometheus grafana loki promtail zookeeper kafka docker-stats-exporter otel-collector service-probe-exporter
 
 echo "[2/4] Waiting for monitoring stack to be healthy (30s)..."
 sleep 30
