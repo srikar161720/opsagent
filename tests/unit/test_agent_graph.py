@@ -119,11 +119,43 @@ class TestHelperFunctions:
         assert len(result) == 1
         assert result[0]["service"] == "redis"
 
-    def test_parse_hypotheses_invalid_json(self) -> None:
+    def test_parse_hypotheses_invalid_json_with_known_services(self) -> None:
+        from src.agent.graph import _parse_hypotheses
+
+        result = _parse_hypotheses("I think cartservice and redis are involved", [])
+        services = [h["service"] for h in result]
+        assert "cartservice" in services
+        assert "redis" in services
+
+    def test_parse_hypotheses_invalid_json_no_services(self) -> None:
         from src.agent.graph import _parse_hypotheses
 
         existing = [{"service": "old", "confidence": 0.5}]
-        result = _parse_hypotheses("no json here", existing)
+        result = _parse_hypotheses("no json and no known service names here", existing)
+        assert result == existing
+
+    def test_parse_hypotheses_markdown_fenced(self) -> None:
+        from src.agent.graph import _parse_hypotheses
+
+        content = '```json\n[{"service": "redis", "confidence": 0.9}]\n```'
+        result = _parse_hypotheses(content, [])
+        assert len(result) == 1
+        assert result[0]["service"] == "redis"
+        assert result[0]["confidence"] == 0.9
+
+    def test_parse_hypotheses_markdown_fenced_no_lang(self) -> None:
+        from src.agent.graph import _parse_hypotheses
+
+        content = '```\n[{"service": "frontend", "confidence": 0.7}]\n```'
+        result = _parse_hypotheses(content, [])
+        assert len(result) == 1
+        assert result[0]["service"] == "frontend"
+
+    def test_parse_hypotheses_empty_content(self) -> None:
+        from src.agent.graph import _parse_hypotheses
+
+        existing = [{"service": "x"}]
+        result = _parse_hypotheses("", existing)
         assert result == existing
 
     def test_extract_actions(self) -> None:

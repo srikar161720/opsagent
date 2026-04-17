@@ -33,9 +33,7 @@ class TestEmbeddings:
 
     def test_embed_text_returns_list_of_floats(self) -> None:
         mock_model = MagicMock()
-        mock_model.encode.return_value = np.array(
-            [0.1, 0.2, 0.3]
-        )
+        mock_model.encode.return_value = np.array([0.1, 0.2, 0.3])
         embeddings._model = mock_model
 
         result = embeddings.embed_text("hello world")
@@ -46,9 +44,7 @@ class TestEmbeddings:
 
     def test_embed_batch_returns_list_of_lists(self) -> None:
         mock_model = MagicMock()
-        mock_model.encode.return_value = np.array(
-            [[0.1, 0.2], [0.3, 0.4]]
-        )
+        mock_model.encode.return_value = np.array([[0.1, 0.2], [0.3, 0.4]])
         embeddings._model = mock_model
 
         result = embeddings.embed_batch(["hello", "world"])
