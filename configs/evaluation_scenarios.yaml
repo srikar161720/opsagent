@@ -17,8 +17,8 @@ fault_types:
 
   - name: "high_latency"
     script: "demo_app/fault_scenarios/02_high_latency.sh"
-    target_service: "paymentservice"
-    ground_truth: "paymentservice"
+    target_service: "frontend"
+    ground_truth: "frontend"
     difficulty: "easy"
     expected_detection_seconds: 60
     cooldown_seconds: 120

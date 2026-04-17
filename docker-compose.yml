@@ -146,6 +146,38 @@ services:
           memory: 128M
           cpus: '0.25'
 
+  # ── OpenTelemetry Collector ────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.91.0
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+      - "9464:9464"   # Prometheus exporter
+    volumes:
+      - ./infrastructure/otel-collector/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml
+    networks:
+      - opsagent-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
+  # ── Service Probe Exporter ─────────────────────────────────────────
+  service-probe-exporter:
+    build: ./infrastructure/service_probe_exporter
+    ports:
+      - "9102:9102"
+    networks:
+      - opsagent-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.25'
+
 networks:
   opsagent-net:
     driver: bridge

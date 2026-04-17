@@ -43,12 +43,13 @@ agent:
     # Tool: discover_causation (runs PC algorithm via causal-learn)
     discover_causation:
       alpha: 0.05             # Statistical significance threshold for edge inclusion
-      lags: [1, 2, 5]         # Time lags (in windows) to include as features
-                              # Lag 1 = 1 min ago, lag 2 = 2 min ago, lag 5 = 5 min ago
+      lags: [1, 2]            # Time lags (in windows) to include as features
+                              # Lag 1 = 1 min ago, lag 2 = 2 min ago
+                              # Lag 5 removed: adds many columns with minimal benefit for short faults
 
 causal_discovery:
   algorithm: "pc"             # PC (Peter-Clark) algorithm from causal-learn library
   alpha: 0.05                 # Significance threshold (should match tools.discover_causation.alpha)
-  max_conditioning_set: 4     # Cap on conditioning set size (depth); limits computational cost
-                              # Depth 4 sufficient for OTel Demo chains (max 3 hops)
-                              # Unrestricted depth with 32 columns takes 30+ min at depth 5-6
+  max_conditioning_set: 3     # Cap on conditioning set size (depth); limits computational cost
+                              # Depth 3 tested as optimal: Depth 4 pruned too aggressively,
+                              # removing weak signals from crashed services
