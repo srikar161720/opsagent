@@ -39,6 +39,7 @@ class AgentExecutor:
         metrics: dict[str, Any] | None = None,
         logs: dict[str, Any] | None = None,
         anomaly_timestamp: str | None = None,
+        start_time: str | None = None,
     ) -> dict[str, Any]:
         """Run a full RCA investigation.
 
@@ -64,6 +65,11 @@ class AgentExecutor:
             metrics: Optional dict of metric data keyed by service name.
             logs: Optional dict of log entries keyed by service name.
             anomaly_timestamp: ISO 8601 timestamp of anomaly detection.
+            start_time: Optional ISO-8601 timestamp. When set, all tool
+                queries use ``[start_time, start_time + time_range_minutes]``
+                as their window instead of ``[now - time_range_minutes, now]``.
+                The evaluation harness passes the fault-injection time so
+                each test sees a window isolated from previous tests.
 
         Returns:
             Dict with keys: root_cause, root_cause_confidence,
@@ -85,6 +91,7 @@ class AgentExecutor:
             "alert": alert,
             "anomaly_window": (ts, ts),
             "affected_services": affected_services,
+            "start_time": start_time,
             "messages": [
                 SystemMessage(content=SYSTEM_PROMPT),
                 HumanMessage(content=self._format_alert(alert, affected_services, ts)),

@@ -58,6 +58,7 @@ def query_metrics(
     service_name: str,
     metric_name: str,
     time_range_minutes: int = 30,
+    start_time: str | None = None,
 ) -> dict:
     """Query Prometheus for a specific service metric over a time window.
 
@@ -81,6 +82,11 @@ def query_metrics(
             Probe metrics (all services): probe_up (1=reachable,
             0=down), probe_latency (TCP connect time in seconds).
         time_range_minutes: How far back from now to query.  Default 30.
+        start_time: Optional ISO-8601 timestamp. When set, the query window
+            is ``[start_time, start_time + time_range_minutes]`` instead of
+            the default ``[now - time_range_minutes, now]``. Used by the
+            evaluation harness to pin a per-test window and avoid cross-
+            test metric pollution.
 
     Returns:
         dict with keys: timestamps, values, stats, anomalous.
@@ -97,8 +103,23 @@ def query_metrics(
 
     try:
         collector = MetricsCollector()
-        end = datetime.now(UTC)
-        start = end - timedelta(minutes=time_range_minutes)
+        now = datetime.now(UTC)
+        if start_time:
+            anchor = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+            if anchor.tzinfo is None:
+                anchor = anchor.replace(tzinfo=UTC)
+            # Extend the pinned window 60s BEFORE the anchor so baseline_mean
+            # (first 60% of the window) reflects pre-fault normalcy, not the
+            # fault itself. Without this, a service with an immediately-spiked
+            # metric has baseline_mean ≈ spike_mean, killing the 10x trigger.
+            start = anchor - timedelta(seconds=60)
+            # End is anchor + time_range, clamped to now so we don't query
+            # the future. Sparse detection uses the actual window length.
+            theoretical_end = anchor + timedelta(minutes=time_range_minutes)
+            end = min(theoretical_end, now)
+        else:
+            end = now
+            start = end - timedelta(minutes=time_range_minutes)
         promql = METRIC_PROMQL[metric_name].replace("{service}", service_name)
         raw = collector.range_query(promql, start, end, step="15s")
 
@@ -116,11 +137,16 @@ def query_metrics(
                 timestamps.append(datetime.fromtimestamp(float(ts), tz=UTC).isoformat())
                 values.append(v)
 
-        # Non-container metrics: missing data does NOT indicate a crash.
-        # - Application metrics (spanmetrics): only available for trace-exporting services
-        # - Probe metrics: gauges from the probe exporter (if exporter is down, no data)
-        # Missing data for these should return a neutral response, not CRITICAL.
-        _app_metrics = {"request_rate", "error_rate", "latency_p99", "probe_up", "probe_latency"}
+        # Application-level metrics (spanmetrics from OTel Collector) are only
+        # available for trace-exporting services. Missing data for these is
+        # NOT a crash signal — it means the service doesn't export traces.
+        _app_metrics = {"request_rate", "error_rate", "latency_p99"}
+
+        # Probe metrics (probe_up, probe_latency) are produced by the Service
+        # Probe Exporter. If the exporter itself is down, we get no data for
+        # ANY service's probe metric — that's infrastructure, not a fault.
+        # The empty-response path returns a neutral note in that case.
+        _probe_metrics = {"probe_up", "probe_latency"}
 
         if not values:
             if metric_name in _app_metrics:
@@ -135,16 +161,36 @@ def query_metrics(
                         f"Use container-level metrics (cpu_usage, memory_usage) instead."
                     ),
                 }
+            if metric_name in _probe_metrics:
+                return {
+                    "timestamps": [],
+                    "values": [],
+                    "stats": {},
+                    "anomalous": False,
+                    "note": (
+                        f"probe exporter unavailable — no {metric_name} data returned. "
+                        f"The Service Probe Exporter may be down. "
+                        f"Fall back to container-level metrics (cpu_usage, memory_usage) "
+                        f"to assess {service_name}."
+                    ),
+                }
+            # Empty container-level metric. We can't distinguish "service
+            # never existed in this window" from "service crashed and stopped
+            # reporting" without a baseline reference. The sparse/stale path
+            # later in this function catches crashes that happen AFTER some
+            # data was recorded. Return a neutral note here — a genuinely
+            # dead service will also lack probe_up data (CRITICAL there)
+            # and the LLM can correlate.
             return {
                 "timestamps": [],
                 "values": [],
                 "stats": {},
-                "anomalous": True,
+                "anomalous": False,
                 "note": (
-                    f"CRITICAL: No metric data returned for {service_name}/{metric_name}. "
-                    f"This strongly indicates the service is DOWN, CRASHED, or UNREACHABLE. "
-                    f"A healthy service always reports metrics. "
-                    f"This service should be considered a top root cause candidate."
+                    f"No {metric_name} data returned for {service_name} in this window. "
+                    f"Cannot distinguish a never-reporting service from a recently-crashed "
+                    f"one without baseline data. Check probe_up for this service — "
+                    f"if probe_up also has no data or is 0, the service is likely DOWN."
                 ),
             }
 
@@ -154,15 +200,51 @@ def query_metrics(
         current = values[-1]
         anomalous = bool(abs(current - mean) > 2 * std) if std > 0 else False
 
+        # Baseline calibration. When start_time is pinned, we know the exact
+        # fault anchor — so we use ALL points BEFORE the anchor as baseline
+        # (maximizes signal-to-noise). Otherwise we fall back to the heuristic
+        # first-60%-of-window.
+        if start_time:
+            # The anchor is 60s after ``start`` (we extended the window 60s
+            # backward earlier). Count how many timestamps fall before it.
+            anchor_ts = start + timedelta(seconds=60)
+            baseline_end = sum(
+                1 for ts in timestamps if datetime.fromisoformat(ts) < anchor_ts
+            )
+        else:
+            baseline_end = int(len(values) * 0.6)
+
+        baseline_mean = float(np.mean(arr[:baseline_end])) if baseline_end >= 2 else mean
+
         # Probe-specific anomaly detection.
         # probe_up=0 is the strongest possible signal that a service is DOWN.
-        # This check is separate from the general 2σ test (which doesn't fire
-        # because 0.0 is within 2σ of a mixed 1/0 series) and from the
-        # sparse/stale CRITICAL (which is skipped for probe metrics).
+        # Two triggers — either fires CRITICAL, but BOTH require a strong
+        # baseline to avoid false-positive on services that are always flaky
+        # (e.g. v1.10.0 currencyservice crash-loops in baseline with
+        # probe_up mean ~0.2 — not a fault, just baseline noise).
+        #   (a) 3+ of the last 4 readings are 0 AND baseline_mean >= 0.7
+        #       (captures a service that WAS healthy, now degraded)
+        #   (b) baseline_mean >= 0.9 AND the last 2 readings are both 0
+        #       (captures a FRESH drop: service was healthy, just crashed)
         if metric_name == "probe_up" and len(values) >= 4:
             recent_down = sum(1 for v in values[-4:] if v == 0.0)
-            was_up = mean > 0.1  # service was previously reachable
-            if recent_down >= 3 and was_up:
+            was_healthy = baseline_mean >= 0.7
+            fresh_drop = (
+                baseline_mean >= 0.9
+                and values[-1] == 0.0
+                and values[-2] == 0.0
+            )
+            if (recent_down >= 3 and was_healthy) or fresh_drop:
+                if fresh_drop and recent_down < 3:
+                    reason = (
+                        f"just dropped from baseline mean={baseline_mean:.2f} "
+                        f"to 0.0 (last 2 readings are 0)"
+                    )
+                else:
+                    reason = (
+                        f"probe_up has been 0 for the last {recent_down} "
+                        f"readings; baseline mean was {baseline_mean:.2f}"
+                    )
                 return {
                     "timestamps": timestamps,
                     "values": values,
@@ -172,24 +254,27 @@ def query_metrics(
                         "mean": mean,
                         "std": std,
                         "current": current,
+                        "baseline_mean": baseline_mean,
                     },
                     "anomalous": True,
                     "note": (
-                        f"CRITICAL: {service_name} is DOWN — probe_up has been 0 "
-                        f"for the last {recent_down} readings. The service is not "
-                        f"responding to connection attempts. "
+                        f"CRITICAL: {service_name} is DOWN — {reason}. "
+                        f"The service is not responding to connection attempts. "
                         f"This service should be considered a top root cause candidate."
                     ),
                 }
 
         # Probe latency spike detection.
-        # A 10x+ increase in probe_latency indicates the service is alive but
-        # severely degraded (e.g., CPU throttling or network latency injection).
+        # A 10x+ increase vs the pre-anomaly baseline indicates the service is
+        # alive but severely degraded (e.g., CPU throttling or network latency
+        # injection). Comparing against baseline_mean (first 60% of window)
+        # instead of full-window mean prevents the anomaly from diluting its
+        # own detection threshold once the fault persists.
         if (
             metric_name == "probe_latency"
             and len(values) >= 4
-            and mean > 0.0001
-            and current > 10 * mean
+            and baseline_mean > 0.0001
+            and current > 10 * baseline_mean
         ):
             return {
                 "timestamps": timestamps,
@@ -200,12 +285,13 @@ def query_metrics(
                     "mean": mean,
                     "std": std,
                     "current": current,
+                    "baseline_mean": baseline_mean,
                 },
                 "anomalous": True,
                 "note": (
                     f"CRITICAL: {service_name} probe latency is severely elevated "
-                    f"(current={current:.4f}s vs mean={mean:.4f}s, "
-                    f"{current / mean:.0f}x increase). The service is responding "
+                    f"(current={current:.4f}s vs baseline_mean={baseline_mean:.4f}s, "
+                    f"{current / baseline_mean:.0f}x increase). The service is responding "
                     f"very slowly. This service should be considered a top root "
                     f"cause candidate."
                 ),
@@ -250,18 +336,27 @@ def query_metrics(
 
         # Detect crashed/down services via two signals:
         #
-        # 1. Stale data: most recent data point is >90s old (service stopped
-        #    reporting entirely).
+        # 1. Stale data: most recent data point is >90s before the window
+        #    end (service stopped reporting entirely). When ``start_time`` is
+        #    pinned, the reference point is the end of the pinned window, not
+        #    ``now`` — otherwise a 3-hour-old pinned window would mark every
+        #    healthy service as stale.
         # 2. Missing data: significantly fewer data points than expected for the
         #    time range. With 15s scrape interval, a 10-min window should have
         #    ~40 points. If we get <70% of expected, data is dropping off
         #    (service went down partway through the window).
         last_ts = datetime.fromisoformat(timestamps[-1])
-        now = datetime.now(UTC)
-        staleness_seconds = (now - last_ts).total_seconds()
+        reference_end = end  # end of the queried window (pinned or "now")
+        staleness_seconds = (reference_end - last_ts).total_seconds()
         stale = staleness_seconds > 90
 
-        expected_points = (time_range_minutes * 60) / 15  # 15s scrape interval
+        # Use the ACTUAL queried window (end - start) to compute expected
+        # points, not the requested time_range_minutes. This matters when
+        # start_time pins the window into the future and end is clamped to
+        # now — expected_points must reflect the elapsed duration, not the
+        # unreached theoretical window.
+        actual_window_seconds = (end - start).total_seconds()
+        expected_points = max(1.0, actual_window_seconds / 15)  # 15s scrape interval
         data_coverage = len(values) / expected_points if expected_points > 0 else 1.0
         # 70% threshold: with 120s pre-investigation wait and rate()[1m] lookback,
         # a crashed service's data expires by ~75s post-crash. At 120s, coverage
@@ -270,10 +365,10 @@ def query_metrics(
         # recovering from a previous test's fault during cooldown periods.
         sparse = data_coverage < 0.70
 
-        # Only apply stale/sparse CRITICAL detection to container-level metrics.
-        # Application metrics (spanmetrics) have irregular data rates based on
-        # traffic volume, not a fixed 15s scrape interval, so the coverage
-        # calculation would produce false CRITICAL signals.
+        # Apply stale/sparse CRITICAL detection to container-level AND probe
+        # metrics (both scraped at 15s intervals). Spanmetrics are excluded
+        # because their data rate depends on traffic volume, not scrape
+        # interval, so the coverage calculation would produce false CRITICAL.
         if metric_name not in _app_metrics and (stale or sparse):
             reason_parts = []
             if stale:
