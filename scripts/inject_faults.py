@@ -137,6 +137,15 @@ def main() -> None:
     parser.add_argument("--cooldown", type=int, default=None)
     parser.add_argument("--max-wait", type=int, default=120)
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help=(
+            "Random seed used to shuffle fault_type order when running all "
+            "fault types (default: 42). Ignored when --fault is set."
+        ),
+    )
+    parser.add_argument(
         "--skip-preflight",
         action="store_true",
         help="Skip preflight checks",
@@ -172,6 +181,7 @@ def main() -> None:
     if args.cooldown is not None:
         suite_args.extend(["--cooldown", str(args.cooldown)])
     suite_args.extend(["--max-wait", str(args.max_wait)])
+    suite_args.extend(["--seed", str(args.seed)])
 
     original_argv = sys.argv
     sys.argv = suite_args

@@ -4,6 +4,15 @@
 # Ground Truth: productcatalogservice
 # Difficulty: Medium
 # Method: Limit CPU to 0.1 cores via docker update (severe throttling).
+#
+# NOT IN ACTIVE REGISTRY (Session 12). This script is retained for reference
+# but is intentionally absent from FAULT_SCRIPTS in
+# tests/evaluation/fault_injection_suite.py. Diagnosis showed
+# productcatalogservice baseline CPU is ~0.09% of a core — a cap at 10%
+# (or even 1%) is never reached, so the fault produces no detectable signal.
+# To re-enable: (a) load-test productcatalogservice so its CPU demand
+# actually exceeds the cap, or (b) migrate to a demo with higher baseline
+# CPU usage, then re-add this entry to FAULT_SCRIPTS.
 set -euo pipefail
 
 CONTAINER="demo_app-productcatalogservice-1"

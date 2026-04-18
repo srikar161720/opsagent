@@ -16,6 +16,16 @@ ACTION="${1:-}"
 case "$ACTION" in
     inject)
         echo "[INJECT] Adding 500ms latency to frontend..."
+        # Idempotent cleanup of any prior state before injection. A previous
+        # run might have left the sidecar container around AND/OR left the
+        # tc netem qdisc on the shared eth0 (removing the sidecar does NOT
+        # remove the qdisc it installed).
+        docker rm -f "$SIDECAR" >/dev/null 2>&1 || true
+        docker run --rm --network "container:$CONTAINER" --cap-add NET_ADMIN \
+            alpine:3.19 \
+            sh -c "apk add --no-cache iproute2 >/dev/null 2>&1 && tc qdisc del dev eth0 root 2>/dev/null || true" \
+            >/dev/null 2>&1 || true
+
         # Run a lightweight Alpine sidecar that shares frontend's network namespace
         docker run -d --rm \
             --name "$SIDECAR" \
@@ -27,8 +37,18 @@ case "$ACTION" in
         ;;
     restore)
         echo "[RESTORE] Removing latency from frontend..."
-        docker exec "$SIDECAR" tc qdisc del dev eth0 root 2>/dev/null || true
-        docker stop "$SIDECAR" 2>/dev/null || true
+        # Strip the qdisc directly via a throwaway container sharing the
+        # target's netns. This works regardless of whether the sidecar is
+        # still alive (covers clean restore, interrupted-inject, and
+        # pre-existing qdisc from a previous session).
+        docker run --rm --network "container:$CONTAINER" --cap-add NET_ADMIN \
+            alpine:3.19 \
+            sh -c "apk add --no-cache iproute2 >/dev/null 2>&1 && tc qdisc del dev eth0 root 2>/dev/null || true" \
+            >/dev/null 2>&1 || true
+
+        # Stop the sidecar container if it's around.
+        docker rm -f "$SIDECAR" >/dev/null 2>&1 || true
+
         echo "[RESTORE] Latency removed from frontend."
         ;;
     *)
