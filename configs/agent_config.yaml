@@ -3,7 +3,7 @@
 
 agent:
   llm:
-    model: "gemini-2.5-flash-lite"   # Primary LLM for reasoning and report generation
+    model: "gemini-3-flash-preview"  # Primary LLM for reasoning and report generation
     temperature: 0.1            # Near-deterministic for reproducible RCA reports
     max_output_tokens: 4096     # Sufficient for a complete RCA report
     # API key: loaded from GEMINI_API_KEY environment variable via python-dotenv

@@ -4,7 +4,8 @@
 # Runner:        scripts/inject_faults.py
 
 # OTel Demo Fault Scenarios
-# 8 fault types x 5 repetitions = 40 total test cases
+# 7 fault types x 5 repetitions = 35 total test cases.
+# cpu_throttling was removed in Session 12 (undetectable on idle demo).
 # Run order: easy -> medium -> hard
 fault_types:
   - name: "service_crash"
@@ -13,7 +14,7 @@ fault_types:
     ground_truth: "cartservice"
     difficulty: "easy"
     expected_detection_seconds: 30
-    cooldown_seconds: 120
+    cooldown_seconds: 300  # Long cooldown: probe_up=0 residue persists ~5min after restart
 
   - name: "high_latency"
     script: "demo_app/fault_scenarios/02_high_latency.sh"
@@ -35,15 +36,12 @@ fault_types:
     injection_params:
       memory_limit_mb: 128
 
-  - name: "cpu_throttling"
-    script: "demo_app/fault_scenarios/04_cpu_throttling.sh"
-    target_service: "productcatalogservice"
-    ground_truth: "productcatalogservice"
-    difficulty: "medium"
-    expected_detection_seconds: 120
-    cooldown_seconds: 180
-    injection_params:
-      cpus: 0.1
+  # cpu_throttling removed in Session 12 after diagnosis showed the fault
+  # is undetectable on the idle demo: productcatalogservice baseline CPU is
+  # 0.09% of a core, so a cap at 10% (or even 1%) never bites. The fault
+  # produces no probe_latency or cpu_usage signal. See docs/evaluation_results.md
+  # for details. Script retained at demo_app/fault_scenarios/04_cpu_throttling.sh
+  # for reference; not part of the active 35-test suite.
 
   - name: "connection_exhaustion"
     script: "demo_app/fault_scenarios/05_connection_exhaustion.sh"
@@ -69,18 +67,22 @@ fault_types:
     ground_truth: "cartservice"
     difficulty: "hard"
     expected_detection_seconds: 60
-    cooldown_seconds: 240
+    cooldown_seconds: 300  # Long cooldown: two restarts + 30s propagation = heavy residue
 
   - name: "config_error"
     script: "demo_app/fault_scenarios/08_config_error.sh"
-    target_service: "currencyservice"
-    ground_truth: "currencyservice"
+    target_service: "productcatalogservice"
+    ground_truth: "productcatalogservice"
     difficulty: "hard"
     expected_detection_seconds: 30
-    cooldown_seconds: 120
+    cooldown_seconds: 180  # Longer than default: replacement container needs cleanup
     injection_params:
-      env_var: "DATABASE_URL"
-      invalid_value: "invalid://bad-url"
+      env_var: "PRODUCT_CATALOG_SERVICE_PORT"
+      invalid_value: "999999"
+    # Note: retargeted from currencyservice in Session 12 because v1.10.0
+    # currencyservice SIGSEGVs in baseline, making the fault indistinguishable.
+    # (cpu_throttling was removed, so productcatalogservice is now targeted
+    # by config_error alone — no duplicate-target ambiguity.)
 
 # Evaluation Runner Settings
 evaluation:
