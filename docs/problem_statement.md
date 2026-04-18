@@ -31,7 +31,7 @@ This separation ensures detection latency remains low (target: < 60 seconds) whi
 
 OpsAgent's evaluation and training leverage three complementary data sources:
 
-1. **OpenTelemetry Demo (self-generated):** A reduced 6-service microservice application with controlled fault injection (8 fault types, 40 test cases). Provides the primary training data and evaluation ground truth.
+1. **OpenTelemetry Demo (self-generated):** A reduced 6-service microservice application with controlled fault injection (7 active fault types, 35 test cases — `cpu_throttling` removed as undetectable on the idle demo). Provides the primary training data and evaluation ground truth.
 
 2. **LogHub HDFS (Zenodo DOI: 10.5281/zenodo.8196385):** 11M+ log lines with block-level anomaly labels. Used for LSTM-Autoencoder pretraining via transfer learning, enabling the model to learn general log anomaly patterns before specializing on the target environment.
 

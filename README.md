@@ -18,7 +18,7 @@ Three complementary data sources serve non-overlapping purposes:
 
 | Dataset | Size | Role |
 |---------|------|------|
-| **OpenTelemetry Demo** (self-generated) | 24h baseline + 40 fault tests | Primary training data and controlled evaluation with known ground truth |
+| **OpenTelemetry Demo** (self-generated) | 24h baseline + 35 fault tests (7 types × 5 reps) | Primary training data and controlled evaluation with known ground truth |
 | **LogHub HDFS** (Zenodo DOI: 10.5281/zenodo.8196385) | 11M+ logs, block-level labels | LSTM-AE pretraining; Drain3 template validation; benchmark vs. DeepLog/LogRobust |
 | **RCAEval** RE1/RE2/RE3 (Zenodo DOI: 10.5281/zenodo.14590730) | 736 labeled failure cases | Cross-system RCA validation; comparison against 5 published baselines |
 
@@ -83,7 +83,7 @@ make test-integration         # Run integration tests
 | Anomaly Detection | PyTorch (LSTM-Autoencoder) | Log sequence anomaly scoring |
 | Causal Discovery | causal-learn | PC Algorithm for root cause graph |
 | Agent Orchestration | LangGraph | Stateful multi-step investigation graph |
-| LLM | Gemini 1.5 Flash | Agent reasoning and report generation |
+| LLM | Gemini 3 Flash (preview) | Agent reasoning and report generation |
 | API | FastAPI | REST endpoint (`POST /investigate`) |
 | Dashboard | Streamlit | Interactive demo UI |
 

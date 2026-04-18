@@ -25,7 +25,7 @@ OpsAgent is evaluated across two primary tracks and one optional benchmark. Each
 | 2 | Root cause incorrect but investigation direction was reasonable; some useful evidence collected |
 | 1 | Root cause incorrect; evidence is irrelevant or missing; report provides no diagnostic value |
 
-Scoring procedure: Manually evaluate 25-30 RCA reports selected across all 8 fault types. Scores are logged to `data/evaluation/explanation_quality_scores.csv`.
+Scoring procedure: Manually evaluate 21–28 RCA reports selected across all 7 active fault types (≥ 3 per type). Scores are logged to `data/evaluation/explanation_quality_scores.csv`.
 
 ## Cross-System Validation — RCAEval (736 Cases)
 
