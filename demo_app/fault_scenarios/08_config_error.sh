@@ -1,45 +1,51 @@
 #!/usr/bin/env bash
 # Fault Injection: Configuration Error
-# Target: currencyservice
-# Ground Truth: currencyservice
+# Target: productcatalogservice
+# Ground Truth: productcatalogservice
 # Difficulty: Hard
-# Method: Stop the compose-managed currencyservice, then start a replacement
-#         container with an invalid port (CURRENCY_SERVICE_PORT=1). Binding to
-#         port 1 requires root privileges, so the gRPC server fails to start
-#         and the container crash-loops, producing stale/no metrics.
+# Method: Stop the compose-managed productcatalogservice, then start a replacement
+#         container with an invalid port (PRODUCT_CATALOG_SERVICE_PORT=999999).
+#         The Go service logs "fatal: invalid port" and exits immediately; with
+#         --restart on-failure it crash-loops, producing probe_up oscillation
+#         between 1 (during the brief startup window) and 0 (during failure).
+#
+# Note: The previous target (currencyservice) was swapped because v1.10.0
+#       currencyservice SIGSEGVs in baseline, making this fault indistinguishable
+#       from normal operation. productcatalogservice has a clean baseline.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/../docker-compose.demo.yml"
-FAULT_CONTAINER="demo_app-currencyservice-fault"
+FAULT_CONTAINER="demo_app-productcatalogservice-fault"
 NETWORK="opsagent_opsagent-net"
-IMAGE="ghcr.io/open-telemetry/demo:1.10.0-currencyservice"
+IMAGE="ghcr.io/open-telemetry/demo:1.10.0-productcatalogservice"
 ACTION="${1:-}"
 
 case "$ACTION" in
     inject)
-        echo "[INJECT] Stopping compose-managed currencyservice..."
-        docker compose -f "$COMPOSE_FILE" stop currencyservice
+        echo "[INJECT] Stopping compose-managed productcatalogservice..."
+        docker compose -f "$COMPOSE_FILE" stop productcatalogservice
 
-        echo "[INJECT] Starting currencyservice with invalid port config..."
+        echo "[INJECT] Starting productcatalogservice with invalid port config..."
         docker run -d \
             --name "$FAULT_CONTAINER" \
             --network "$NETWORK" \
-            --network-alias currencyservice \
-            -e CURRENCY_SERVICE_PORT=1 \
+            --network-alias productcatalogservice \
+            --restart on-failure \
+            -e PRODUCT_CATALOG_SERVICE_PORT=999999 \
             "$IMAGE"
-        echo "[INJECT] Faulty currencyservice running. Will crash-loop due to port bind failure."
+        echo "[INJECT] Faulty productcatalogservice running. Will crash-loop due to invalid port."
         ;;
     restore)
-        echo "[RESTORE] Stopping faulty currencyservice container..."
+        echo "[RESTORE] Stopping faulty productcatalogservice container..."
         docker stop "$FAULT_CONTAINER" 2>/dev/null || true
         docker rm "$FAULT_CONTAINER" 2>/dev/null || true
 
-        echo "[RESTORE] Starting compose-managed currencyservice..."
-        docker compose -f "$COMPOSE_FILE" start currencyservice
-        echo "[RESTORE] Waiting 15s for currencyservice to stabilize..."
+        echo "[RESTORE] Starting compose-managed productcatalogservice..."
+        docker compose -f "$COMPOSE_FILE" start productcatalogservice
+        echo "[RESTORE] Waiting 15s for productcatalogservice to stabilize..."
         sleep 15
-        echo "[RESTORE] currencyservice restored to normal configuration."
+        echo "[RESTORE] productcatalogservice restored to normal configuration."
         ;;
     *)
         echo "Usage: $0 {inject|restore}"
