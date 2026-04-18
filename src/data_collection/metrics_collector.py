@@ -7,12 +7,29 @@ used by both the real-time Fast Loop and offline evaluation.
 from __future__ import annotations
 
 import logging
+import math
+import re
 from datetime import datetime
 from typing import Any
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_step_seconds(step: str) -> float:
+    """Parse a Prometheus step string (e.g. "15s", "1m", "30") into seconds.
+
+    Returns 15.0 if the string cannot be parsed — matches the widely-used
+    default scrape interval.
+    """
+    match = re.match(r"^\s*(\d+(?:\.\d+)?)\s*([smhd])?\s*$", step)
+    if not match:
+        return 15.0
+    value = float(match.group(1))
+    unit = match.group(2) or "s"
+    multipliers = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+    return value * multipliers[unit]
 
 
 class MetricsCollector:
@@ -90,8 +107,22 @@ class MetricsCollector:
             step:           Range query step interval.
 
         Returns:
-            Dict mapping metric_name → list of float values.
+            Dict mapping metric_name → list of float values. For range queries,
+            a missing metric (no Prometheus series — e.g. ``error_rate`` when no
+            errors occurred) is zero-filled to the expected number of steps so
+            downstream consumers (causal discovery) don't bail on empty data.
+            NaN values (e.g. ``histogram_quantile`` on empty buckets) are
+            coerced to 0.0. For instant queries, a missing metric yields
+            ``[0.0]``.
         """
+        # Compute expected step count for zero-fill sizing on range queries.
+        if start is not None and end is not None:
+            step_seconds = _parse_step_seconds(step)
+            window_seconds = (end - start).total_seconds()
+            expected_steps = max(1, int(window_seconds / step_seconds))
+        else:
+            expected_steps = 1
+
         result: dict[str, list[float]] = {}
         for metric_name, query_template in metric_queries.items():
             query = query_template.replace("{service}", service)
@@ -99,9 +130,27 @@ class MetricsCollector:
                 raw = self.range_query(query, start, end, step)
                 values: list[float] = []
                 for series in raw:
-                    values.extend(float(v) for _, v in series.get("values", []))
+                    for _, raw_val in series.get("values", []):
+                        try:
+                            v = float(raw_val)
+                        except (TypeError, ValueError):
+                            v = 0.0
+                        values.append(0.0 if math.isnan(v) else v)
+                if not values:
+                    # Empty series → zero-fill so PC/discovery doesn't bail out.
+                    values = [0.0] * expected_steps
             else:
                 raw = self.instant_query(query)
-                values = [float(r["value"][1]) for r in raw if "value" in r]
+                values = []
+                for r in raw:
+                    if "value" not in r:
+                        continue
+                    try:
+                        v = float(r["value"][1])
+                    except (TypeError, ValueError):
+                        v = 0.0
+                    values.append(0.0 if math.isnan(v) else v)
+                if not values:
+                    values = [0.0]
             result[metric_name] = values
         return result
