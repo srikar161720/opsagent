@@ -180,13 +180,216 @@ class TestQueryMetrics:
         mock_instance = mock_cls.return_value
         mock_instance.range_query.return_value = []
         result = query_metrics.invoke({"service_name": "frontend", "metric_name": "cpu_usage"})
+        # Empty container-level metric response is NEUTRAL (not CRITICAL)
+        # because we can't distinguish "never reported" (baseline-flaky
+        # service like currencyservice) from "recently crashed" without
+        # a historical baseline. Sparse/stale CRITICAL handles the latter.
         assert result["values"] == []
         assert result["timestamps"] == []
+        assert result["anomalous"] is False
+        assert "CRITICAL" not in result.get("note", "")
+
+    @patch("src.agent.tools.query_metrics.MetricsCollector")
+    def test_probe_latency_spike_uses_baseline_mean(self, mock_cls: MagicMock) -> None:
+        """probe_latency CRITICAL uses first-60% baseline, not full-window mean.
+
+        Without this fix, once half the window is spiked, full-window mean
+        equals ~(baseline + spike)/2, and the 10x ratio check fails. With the
+        baseline-only mean, the ratio stays >10x.
+        """
+        from src.agent.tools.query_metrics import query_metrics
+
+        # 40 points: first 24 at baseline 0.001s, last 16 at spike 0.500s.
+        # baseline_mean = 0.001, current = 0.500 → ratio = 500x > 10x ✓
+        # Contaminated full-window mean = 0.2 → ratio = 2.5x (would fail old check)
+        values = [0.001] * 24 + [0.500] * 16
+        mock_instance = mock_cls.return_value
+        mock_instance.range_query.return_value = self._mock_range_response(values)
+        # Use 10-min window so 40 points = 100% coverage (not 33% sparse).
+        result = query_metrics.invoke(
+            {
+                "service_name": "frontend",
+                "metric_name": "probe_latency",
+                "time_range_minutes": 10,
+            }
+        )
+        assert result["anomalous"] is True
+        assert "CRITICAL" in result["note"]
+        assert "baseline_mean" in result["stats"]
+
+    @patch("src.agent.tools.query_metrics.MetricsCollector")
+    def test_probe_latency_no_spike_stable_baseline(self, mock_cls: MagicMock) -> None:
+        """Stable latency must NOT fire CRITICAL."""
+        from src.agent.tools.query_metrics import query_metrics
+
+        values = [0.001] * 40
+        mock_instance = mock_cls.return_value
+        mock_instance.range_query.return_value = self._mock_range_response(values)
+        # Use 10-min window so 40 points = 100% coverage, no sparse false-trip.
+        result = query_metrics.invoke(
+            {
+                "service_name": "frontend",
+                "metric_name": "probe_latency",
+                "time_range_minutes": 10,
+            }
+        )
+        assert "CRITICAL" not in result.get("note", "")
+
+    @patch("src.agent.tools.query_metrics.MetricsCollector")
+    def test_probe_up_fresh_drop_fires_critical(self, mock_cls: MagicMock) -> None:
+        """A service healthy for the entire window until the last 2 readings
+        must trigger CRITICAL via the fresh-drop check (baseline_mean >= 0.9
+        AND last 2 readings both 0), even though fewer than 3 of the last 4
+        are zero."""
+        from src.agent.tools.query_metrics import query_metrics
+
+        # 40 points: 38 healthy (1.0) then 2 zeros. Last 4 = [1, 1, 0, 0] →
+        # old "3+ of 4 zeros" check would NOT fire. Baseline (first 24) = 1.0
+        # and last 2 are 0 → fresh-drop DOES fire.
+        values = [1.0] * 38 + [0.0, 0.0]
+        mock_instance = mock_cls.return_value
+        mock_instance.range_query.return_value = self._mock_range_response(values)
+        result = query_metrics.invoke(
+            {
+                "service_name": "paymentservice",
+                "metric_name": "probe_up",
+                "time_range_minutes": 10,
+            }
+        )
+        assert result["anomalous"] is True
+        assert "CRITICAL" in result["note"]
+        assert "baseline_mean" in result["stats"]
+
+    @patch("src.agent.tools.query_metrics.MetricsCollector")
+    def test_probe_exporter_unavailable_is_not_critical(self, mock_cls: MagicMock) -> None:
+        """If the probe exporter is down (no series returned), the response
+        is neutral, not CRITICAL — we can't tell whether the service is down
+        or the exporter is down."""
+        from src.agent.tools.query_metrics import query_metrics
+
+        mock_instance = mock_cls.return_value
+        mock_instance.range_query.return_value = []
+        result = query_metrics.invoke(
+            {"service_name": "frontend", "metric_name": "probe_up"}
+        )
+        assert result["anomalous"] is False
+        assert "probe exporter unavailable" in result.get("note", "")
+
+    @patch("src.agent.tools.query_metrics.MetricsCollector")
+    def test_start_time_sets_window(self, mock_cls: MagicMock) -> None:
+        """When start_time is given, the collector is called with a window
+        that extends 60s BEFORE the anchor (for pre-fault baseline context)
+        and ends at min(anchor + time_range, now)."""
+        from datetime import UTC, datetime, timedelta
+
+        from src.agent.tools.query_metrics import query_metrics
+
+        mock_instance = mock_cls.return_value
+        mock_instance.range_query.return_value = self._mock_range_response([0.5] * 40)
+
+        # Use a start time far in the past so end clamps naturally.
+        anchor = datetime.now(UTC) - timedelta(hours=2)
+        iso = anchor.isoformat()
+        query_metrics.invoke(
+            {
+                "service_name": "frontend",
+                "metric_name": "cpu_usage",
+                "time_range_minutes": 10,
+                "start_time": iso,
+            }
+        )
+        call = mock_instance.range_query.call_args
+        actual_start: datetime = call.args[1]
+        actual_end: datetime = call.args[2]
+        # start must be 60s BEFORE the pinned anchor (pre-fault baseline)
+        expected_start = anchor - timedelta(seconds=60)
+        assert abs((actual_start - expected_start).total_seconds()) < 1
+        # end must be anchor + 10min (anchor + 10min is still in the past)
+        expected_end = anchor + timedelta(minutes=10)
+        assert abs((actual_end - expected_end).total_seconds()) < 1
+
+    @patch("src.agent.tools.query_metrics.MetricsCollector")
+    def test_start_time_clamps_future_end_to_now(self, mock_cls: MagicMock) -> None:
+        """If start_time + time_range_minutes is in the future, end is
+        clamped to now so we don't query data that doesn't exist yet."""
+        from datetime import UTC, datetime, timedelta
+
+        from src.agent.tools.query_metrics import query_metrics
+
+        mock_instance = mock_cls.return_value
+        mock_instance.range_query.return_value = self._mock_range_response([0.5] * 8)
+
+        # start = 2 minutes ago → theoretical end is 8 min in future → clamp.
+        near = datetime.now(UTC) - timedelta(minutes=2)
+        query_metrics.invoke(
+            {
+                "service_name": "frontend",
+                "metric_name": "cpu_usage",
+                "time_range_minutes": 10,
+                "start_time": near.isoformat(),
+            }
+        )
+        call = mock_instance.range_query.call_args
+        actual_end: datetime = call.args[2]
+        now = datetime.now(UTC)
+        # end should be within a few seconds of now, NOT 8 minutes in future
+        assert abs((actual_end - now).total_seconds()) < 5
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # TestSearchLogs
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBuildLogQL:
+    """Tests for the _build_logql helper (LogQL construction).
+
+    Ensures OR-style queries produced by the LLM or the forced log search
+    are converted into a regex line filter instead of a broken literal
+    filter with embedded quotes.
+    """
+
+    def test_single_term_uses_literal_filter(self) -> None:
+        from src.agent.tools.search_logs import _build_logql
+
+        logql = _build_logql("OOM", "cartservice")
+        assert '|= `OOM`' in logql
+        assert 'service="cartservice"' in logql
+
+    def test_or_alternation_uses_regex_filter(self) -> None:
+        from src.agent.tools.search_logs import _build_logql
+
+        logql = _build_logql("panic OR fatal OR error", "productcatalogservice")
+        assert "|~" in logql
+        # Case-insensitive alternation
+        assert "(?i)" in logql
+        for term in ("panic", "fatal", "error"):
+            assert term in logql
+
+    def test_nested_quotes_stripped(self) -> None:
+        """Embedded double quotes inside OR terms must be stripped so they
+        can't terminate the LogQL string literal (the bug that produced
+        400 Bad Request during the April 17 eval run)."""
+        from src.agent.tools.search_logs import _build_logql
+
+        logql = _build_logql('panic OR fatal OR "bind"', "productcatalogservice")
+        assert '"bind"' not in logql
+        # bind itself must still be present as a regex term
+        assert "bind" in logql
+
+    def test_backtick_string_literal(self) -> None:
+        """Use backtick strings for LogQL to avoid any quote-escaping issues."""
+        from src.agent.tools.search_logs import _build_logql
+
+        logql = _build_logql("connection refused", "cartservice")
+        # backticks, not double-quotes, around the term
+        assert '`connection refused`' in logql
+
+    def test_no_service_filter_uses_job_label(self) -> None:
+        from src.agent.tools.search_logs import _build_logql
+
+        logql = _build_logql("error", None)
+        assert 'job="docker"' in logql
 
 
 class TestSearchLogs:
@@ -315,6 +518,91 @@ class TestSearchLogs:
         assert result["entries"] == []
         assert result["total_count"] == 0
         assert result["error_count"] == 0
+
+    def _mock_crash_loki_response(self, service: str, crash_count: int) -> dict:
+        """Build a Loki response with ``crash_count`` crash-pattern matches."""
+        crash_msgs = [
+            "FATAL ERROR: OOMKilled by kernel oom_reaper",
+            "panic: runtime error: nil pointer",
+            "SIGSEGV: segmentation fault at 0x0",
+            "terminate called after throwing an instance of std::logic_error",
+            "container exited with code 137",
+        ]
+        entries = [
+            (str(1704067200_000000000 + i), crash_msgs[i % len(crash_msgs)])
+            for i in range(crash_count)
+        ]
+        return {
+            "status": "success",
+            "data": {
+                "resultType": "streams",
+                "result": [
+                    {
+                        "stream": {"service": service, "job": "docker"},
+                        "values": entries,
+                    }
+                ],
+            },
+        }
+
+    @patch("src.agent.tools.search_logs.requests.get")
+    def test_crash_signal_escalates_to_critical(self, mock_get: MagicMock) -> None:
+        """When a log search returns ≥3 crash-pattern matches for a specific
+        service, the result dict includes a ``critical_service`` field and a
+        ``CRITICAL: …`` note. This is what Fix 17 uses to propagate crash
+        signals to ``analyze_causation_node``."""
+        from src.agent.tools.search_logs import search_logs
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._mock_crash_loki_response(
+            service="checkoutservice", crash_count=5
+        )
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        result = search_logs.invoke(
+            {"query": "OOM OR panic OR fatal", "service_filter": "checkoutservice"}
+        )
+        assert result.get("critical_service") == "checkoutservice"
+        assert result.get("anomalous") is True
+        assert "CRITICAL" in result.get("note", "")
+        assert result.get("crash_match_count") == 5
+
+    @patch("src.agent.tools.search_logs.requests.get")
+    def test_single_crash_match_no_escalation(self, mock_get: MagicMock) -> None:
+        """One stray fatal message isn't enough to escalate — the ≥3
+        threshold filters out one-off transient warnings."""
+        from src.agent.tools.search_logs import search_logs
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._mock_crash_loki_response(
+            service="checkoutservice", crash_count=1
+        )
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        result = search_logs.invoke(
+            {"query": "fatal", "service_filter": "checkoutservice"}
+        )
+        assert "critical_service" not in result
+        assert "CRITICAL" not in result.get("note", "")
+        assert result.get("crash_match_count") == 1
+
+    @patch("src.agent.tools.search_logs.requests.get")
+    def test_no_service_filter_no_escalation(self, mock_get: MagicMock) -> None:
+        """Without service_filter, a crash signature can't be attributed to
+        one service, so we refuse to escalate even with many matches."""
+        from src.agent.tools.search_logs import search_logs
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._mock_crash_loki_response(
+            service="any", crash_count=10
+        )
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        result = search_logs.invoke({"query": "panic OR OOM OR fatal"})
+        assert "critical_service" not in result
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -513,3 +801,208 @@ class TestDiscoverCausation:
             {"services": ["svc_a", "svc_b"], "time_range_minutes": 30}
         )
         assert result["root_cause"] == "inconclusive"
+
+    @patch("src.agent.tools.discover_causation.MetricsCollector")
+    def test_critical_service_becomes_root(self, mock_cls: MagicMock) -> None:
+        """With critical_services=['svc_a'], svc_a is excluded from PC input
+        but becomes the root cause and synthesized edges are produced."""
+        from src.agent.tools.discover_causation import discover_causation
+
+        rng = np.random.default_rng(42)
+        n = 40
+        # Only svc_b and svc_c get metrics (svc_a is critical → excluded from PC)
+        b_vals = rng.normal(0, 1, n).tolist()
+        c_vals = (0.8 * np.array(b_vals) + rng.normal(0, 0.3, n)).tolist()
+
+        mock_instance = mock_cls.return_value
+        # side_effect only consumed for non-critical services (svc_b, svc_c)
+        mock_instance.get_service_metrics.side_effect = [
+            {
+                "cpu": b_vals,
+                "memory": b_vals,
+                "net_rx": b_vals,
+                "net_tx": b_vals,
+                "probe_up": [1.0] * n,
+                "probe_latency": [0.01] * n,
+            },
+            {
+                "cpu": c_vals,
+                "memory": c_vals,
+                "net_rx": c_vals,
+                "net_tx": c_vals,
+                "probe_up": [1.0] * n,
+                "probe_latency": [0.01] * n,
+            },
+        ]
+        result = discover_causation.invoke(
+            {
+                "services": ["svc_a", "svc_b", "svc_c"],
+                "time_range_minutes": 10,
+                "critical_services": ["svc_a"],
+            }
+        )
+        # Root cause must be the critical service with confidence >= 0.75
+        assert result["root_cause"] == "svc_a"
+        assert result["root_cause_confidence"] >= 0.75
+        # Only svc_b and svc_c were fetched — svc_a was skipped
+        assert mock_instance.get_service_metrics.call_count == 2
+
+    def test_metric_set_excludes_spanmetrics(self) -> None:
+        """_CAUSAL_METRICS must NOT include spanmetrics (request_rate /
+        error_rate / latency). Spanmetrics are unavailable for non-trace
+        services (cartservice / redis / currencyservice) and their empty
+        series crashed PC on every investigation."""
+        from src.agent.tools.discover_causation import _CAUSAL_METRICS
+
+        assert "request_rate" not in _CAUSAL_METRICS
+        assert "error_rate" not in _CAUSAL_METRICS
+        assert "latency" not in _CAUSAL_METRICS
+        # Container + probe metrics must still be present.
+        for required in ("cpu", "memory", "net_rx", "net_tx", "probe_up", "probe_latency"):
+            assert required in _CAUSAL_METRICS
+
+    @patch("src.agent.tools.discover_causation.MetricsCollector")
+    def test_partial_data_still_runs_pc(self, mock_cls: MagicMock) -> None:
+        """With the softened gate (min_len>=6, <=30% short columns), partial
+        data from one service should not abort the whole analysis."""
+        from src.agent.tools.discover_causation import discover_causation
+
+        rng = np.random.default_rng(42)
+        n = 40
+        a_vals = rng.normal(0, 1, n).tolist()
+        b_vals = (0.8 * np.array(a_vals) + rng.normal(0, 0.3, n)).tolist()
+
+        # Six metrics each: all 40 points for cpu / memory / net_rx / net_tx,
+        # with probe_up / probe_latency at 40 points too — all well above 6.
+        # (Short-column case exercised separately via a synthetic scenario.)
+        mock_instance = mock_cls.return_value
+        mock_instance.get_service_metrics.side_effect = [
+            {
+                "cpu": a_vals,
+                "memory": a_vals,
+                "net_rx": a_vals,
+                "net_tx": a_vals,
+                "probe_up": [1.0] * n,
+                "probe_latency": [0.01] * n,
+            },
+            {
+                "cpu": b_vals,
+                "memory": b_vals,
+                "net_rx": b_vals,
+                "net_tx": b_vals,
+                "probe_up": [1.0] * n,
+                "probe_latency": [0.01] * n,
+            },
+        ]
+
+        result = discover_causation.invoke(
+            {"services": ["svc_a", "svc_b"], "time_range_minutes": 10}
+        )
+        # With 40 points + strong correlation, PC should produce something
+        # other than "inconclusive due to insufficient data".
+        assert "Insufficient data points" not in result.get("counterfactual", "")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestMetricsCollector (Fix 8: zero-fill + NaN filter)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestMetricsCollector:
+    """Tests for get_service_metrics zero-fill and NaN handling."""
+
+    @patch("src.data_collection.metrics_collector.requests.get")
+    def test_empty_range_returns_zero_filled(self, mock_get: MagicMock) -> None:
+        """Empty Prometheus range response must zero-fill to the expected step
+        count so downstream consumers (causal discovery) don't bail."""
+        from datetime import UTC, datetime, timedelta
+
+        from src.data_collection.metrics_collector import MetricsCollector
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"status": "success", "data": {"result": []}}
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        collector = MetricsCollector()
+        end = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        start = end - timedelta(minutes=10)  # 600s window
+        result = collector.get_service_metrics(
+            service="frontend",
+            metric_queries={"error_rate": "foo"},
+            start=start,
+            end=end,
+            step="15s",
+        )
+        # Expected steps = 600 / 15 = 40
+        assert len(result["error_rate"]) == 40
+        assert all(v == 0.0 for v in result["error_rate"])
+
+    @patch("src.data_collection.metrics_collector.requests.get")
+    def test_nan_values_filtered(self, mock_get: MagicMock) -> None:
+        """NaN values (e.g. histogram_quantile on empty buckets) must be
+        coerced to 0.0 so they don't propagate through pandas."""
+        from datetime import UTC, datetime, timedelta
+
+        from src.data_collection.metrics_collector import MetricsCollector
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "success",
+            "data": {
+                "result": [
+                    {
+                        "metric": {"service": "frontend"},
+                        "values": [[1000, "1.0"], [1015, "NaN"], [1030, "2.0"]],
+                    }
+                ]
+            },
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        collector = MetricsCollector()
+        end = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        start = end - timedelta(seconds=45)
+        result = collector.get_service_metrics(
+            service="frontend",
+            metric_queries={"latency": "foo"},
+            start=start,
+            end=end,
+            step="15s",
+        )
+        vals = result["latency"]
+        assert 1.0 in vals
+        assert 2.0 in vals
+        # NaN coerced to 0.0 — no NaN should remain.
+        for v in vals:
+            import math
+
+            assert not math.isnan(v)
+
+    @patch("src.data_collection.metrics_collector.requests.get")
+    def test_instant_query_empty_returns_zero(self, mock_get: MagicMock) -> None:
+        """Empty instant query returns [0.0], not []."""
+        from src.data_collection.metrics_collector import MetricsCollector
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"status": "success", "data": {"result": []}}
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        collector = MetricsCollector()
+        result = collector.get_service_metrics(
+            service="frontend",
+            metric_queries={"cpu": "foo"},
+        )
+        assert result["cpu"] == [0.0]
+
+    def test_parse_step_seconds(self) -> None:
+        """_parse_step_seconds must handle 15s, 1m, 30, etc."""
+        from src.data_collection.metrics_collector import _parse_step_seconds
+
+        assert _parse_step_seconds("15s") == 15.0
+        assert _parse_step_seconds("1m") == 60.0
+        assert _parse_step_seconds("30") == 30.0
+        # Unparseable defaults to 15s.
+        assert _parse_step_seconds("garbage") == 15.0

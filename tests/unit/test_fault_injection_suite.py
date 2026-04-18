@@ -13,6 +13,7 @@ from tests.evaluation.fault_injection_suite import (
     GROUND_TRUTH,
     _load_per_fault_cooldowns,
     _resolve_script,
+    _shuffled_faults,
     run_fault_injection,
 )
 
@@ -22,10 +23,39 @@ from tests.evaluation.fault_injection_suite import (
 # ---------------------------------------------------------------------------
 class TestFaultScripts:
     def test_all_scripts_in_registry(self) -> None:
-        assert len(FAULT_SCRIPTS) == 8
+        # 7 active fault types (cpu_throttling removed in Session 12 —
+        # undetectable on idle demo; see fault_injection_suite.py docstring).
+        assert len(FAULT_SCRIPTS) == 7
 
     def test_all_ground_truths_defined(self) -> None:
-        assert len(GROUND_TRUTH) == 8
+        assert len(GROUND_TRUTH) == 7
+
+    def test_cpu_throttling_excluded(self) -> None:
+        """cpu_throttling was removed in Session 12 after diagnosis showed
+        the fault is undetectable on the idle demo (baseline CPU 0.09% of
+        a core is far below any reasonable Docker cap)."""
+        assert "cpu_throttling" not in FAULT_SCRIPTS
+        assert "cpu_throttling" not in GROUND_TRUTH
+
+    def test_main_rejects_unknown_fault_type(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Invoking the suite with --fault <unknown> must emit a helpful
+        error (not a KeyError traceback) and exit non-zero."""
+        from tests.evaluation.fault_injection_suite import main as suite_main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["fault_injection_suite", "--fault", "cpu_throttling", "--repetitions", "1"],
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            suite_main()
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "cpu_throttling" in captured.err
+        assert "not a registered fault type" in captured.err
 
     def test_scripts_match_ground_truths(self) -> None:
         assert set(FAULT_SCRIPTS.keys()) == set(GROUND_TRUTH.keys())
@@ -46,6 +76,11 @@ class TestFaultScripts:
         }
         for svc in GROUND_TRUTH.values():
             assert svc in known
+
+    def test_config_error_targets_productcatalogservice(self) -> None:
+        """config_error must target productcatalogservice (retargeted from currencyservice
+        in Session 12 due to v1.10.0 baseline crash-loop issue)."""
+        assert GROUND_TRUTH["config_error"] == "productcatalogservice"
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +133,36 @@ class TestRunFaultInjection:
         assert result["ground_truth"] == "cartservice"
         assert result["predicted_root_cause"] == "cartservice"
         assert result["is_correct"] is True
+
+    @patch("tests.evaluation.fault_injection_suite.subprocess.run")
+    @patch("tests.evaluation.fault_injection_suite.time.sleep")
+    def test_alert_excludes_currencyservice(
+        self,
+        mock_sleep: MagicMock,
+        mock_subprocess: MagicMock,
+        mock_agent: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """The alert sent to the agent must NOT list currencyservice as an
+        affected service. v1.10.0 currencyservice SIGSEGVs continuously in
+        baseline; surfacing it to the agent causes consistent misattribution
+        (see Session 12 diagnosis in fault_injection_suite.py comment)."""
+        run_fault_injection(
+            "service_crash", 1, tmp_path, mock_agent, max_wait_seconds=120
+        )
+        # The mock agent's investigate() received the alert as a kwarg.
+        alert = mock_agent.investigate.call_args.kwargs["alert"]
+        affected = alert["affected_services"]
+        assert "currencyservice" not in affected
+        # The 6 services that ARE legitimate investigation targets.
+        assert set(affected) == {
+            "cartservice",
+            "checkoutservice",
+            "frontend",
+            "paymentservice",
+            "productcatalogservice",
+            "redis",
+        }
 
     @patch("tests.evaluation.fault_injection_suite.subprocess.run")
     @patch("tests.evaluation.fault_injection_suite.time.sleep")
@@ -243,8 +308,52 @@ class TestLoadPerFaultCooldowns:
         assert result["test_fault"] == 300
 
     def test_loads_real_config(self) -> None:
-        """Verify the actual evaluation_scenarios.yaml loads correctly."""
+        """Verify the actual evaluation_scenarios.yaml loads correctly.
+        7 active fault types after cpu_throttling removal in Session 12."""
         result = _load_per_fault_cooldowns()
         if result:  # Only if the file exists in this environment
-            assert len(result) == 8
+            assert len(result) == 7
             assert all(isinstance(v, int) for v in result.values())
+
+    def test_cooldowns_destructive_faults_are_300s(self) -> None:
+        """service_crash and cascading_failure use 300s cooldown (raised from 120/240
+        in Session 12) — their container restarts leak probe_up=0 residue for
+        >5 minutes, so a shorter cooldown pollutes the next test's 10-min window."""
+        result = _load_per_fault_cooldowns()
+        if result:
+            assert result["service_crash"] == 300
+            assert result["cascading_failure"] == 300
+
+
+# ---------------------------------------------------------------------------
+# TestShuffledFaults
+# ---------------------------------------------------------------------------
+class TestShuffledFaults:
+    def test_preserves_full_set(self) -> None:
+        """Shuffle returns a permutation — same elements, possibly reordered."""
+        faults = ["a", "b", "c", "d", "e", "f", "g", "h"]
+        result = _shuffled_faults(faults, seed=42)
+        assert sorted(result) == sorted(faults)
+
+    def test_deterministic_for_same_seed(self) -> None:
+        """Same seed → same permutation."""
+        faults = list(FAULT_SCRIPTS.keys())
+        a = _shuffled_faults(faults, seed=42)
+        b = _shuffled_faults(faults, seed=42)
+        assert a == b
+
+    def test_different_seed_different_order(self) -> None:
+        """Different seeds produce (typically) different orderings."""
+        faults = list(FAULT_SCRIPTS.keys())
+        a = _shuffled_faults(faults, seed=1)
+        b = _shuffled_faults(faults, seed=99)
+        # With 8 faults and two different seeds, equal orderings are
+        # astronomically unlikely. If this ever flakes, the seeds collide
+        # on a ~1/40320 probability.
+        assert a != b
+
+    def test_original_not_mutated(self) -> None:
+        """Shuffle must not modify the caller's list."""
+        original = ["a", "b", "c"]
+        _shuffled_faults(original, seed=7)
+        assert original == ["a", "b", "c"]

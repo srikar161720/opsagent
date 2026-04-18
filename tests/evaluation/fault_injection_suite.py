@@ -1,16 +1,22 @@
 """Automated fault injection test runner for OTel Demo evaluation.
 
-Orchestrates 40 fault injection tests (8 fault types x 5 runs):
+Orchestrates 35 fault injection tests (7 fault types × 5 runs):
 inject fault -> wait -> call agent investigation -> save result JSON -> restore.
+
+cpu_throttling was removed from the active scope in Session 12 because the
+fault is undetectable on the idle demo — see the FAULT_SCRIPTS definition
+and CLAUDE.md for the full rationale.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import random
 import subprocess
+import sys
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -21,11 +27,16 @@ if TYPE_CHECKING:
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
+# Active fault scenarios (7 types × 5 repetitions = 35 tests).
+# cpu_throttling was removed in Session 12: `docker update --cpus 0.1` against
+# productcatalogservice (baseline CPU 0.09%) never forces the service above
+# the cap, so the fault produces no detectable signal. The shell script remains
+# at demo_app/fault_scenarios/04_cpu_throttling.sh for reference, but it is
+# intentionally absent from this registry.
 FAULT_SCRIPTS: dict[str, str] = {
     "service_crash": "demo_app/fault_scenarios/01_service_crash.sh",
     "high_latency": "demo_app/fault_scenarios/02_high_latency.sh",
     "memory_pressure": "demo_app/fault_scenarios/03_memory_pressure.sh",
-    "cpu_throttling": "demo_app/fault_scenarios/04_cpu_throttling.sh",
     "connection_exhaustion": "demo_app/fault_scenarios/05_connection_exhaustion.sh",
     "network_partition": "demo_app/fault_scenarios/06_network_partition.sh",
     "cascading_failure": "demo_app/fault_scenarios/07_cascading_failure.sh",
@@ -36,11 +47,10 @@ GROUND_TRUTH: dict[str, str] = {
     "service_crash": "cartservice",
     "high_latency": "frontend",
     "memory_pressure": "checkoutservice",
-    "cpu_throttling": "productcatalogservice",
     "connection_exhaustion": "redis",
     "network_partition": "paymentservice",
     "cascading_failure": "cartservice",
-    "config_error": "currencyservice",
+    "config_error": "productcatalogservice",
 }
 
 
@@ -65,7 +75,7 @@ def run_fault_injection(
         "fault_type": fault_type,
         "run_id": run_id,
         "ground_truth": GROUND_TRUTH[fault_type],
-        "fault_start_time": datetime.now().isoformat(),
+        "fault_start_time": datetime.now(UTC).isoformat(),
         "status": "running",
     }
 
@@ -82,11 +92,11 @@ def run_fault_injection(
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         record["status"] = "failed"
         record["error"] = str(e)
-        record["fault_end_time"] = datetime.now().isoformat()
+        record["fault_end_time"] = datetime.now(UTC).isoformat()
         _save_result(record, output_dir)
         return record
 
-    record["fault_end_time"] = datetime.now().isoformat()
+    record["fault_end_time"] = datetime.now(UTC).isoformat()
 
     # --- Wait for anomaly to manifest, then trigger investigation ---
     print(f"  Waiting up to {max_wait_seconds}s for anomaly detection...")
@@ -100,7 +110,7 @@ def run_fault_injection(
         # At 120s, a crashed service's coverage drops to ~65% (well below
         # the 70% sparse threshold), producing a reliable CRITICAL signal.
         time.sleep(120)
-        alert_time = datetime.now().isoformat()
+        alert_time = datetime.now(UTC).isoformat()
         break
 
     if alert_time is None:
@@ -108,6 +118,15 @@ def run_fault_injection(
         record["is_correct"] = False
     else:
         record["alert_time"] = alert_time
+        # currencyservice is deliberately EXCLUDED from affected_services.
+        # The v1.10.0 image has a SIGSEGV crash-loop bug that throws
+        # "std::logic_error: basic_string: construction from null is not valid"
+        # and exits continuously in baseline. Including it in the sweep
+        # causes the agent to fixate on currencyservice's probe_up=0 and
+        # crash logs — both real but unrelated to the injected fault.
+        # currencyservice is never a ground-truth target in the active
+        # 7-fault suite (config_error was retargeted to productcatalogservice
+        # in Session 12 for this exact reason).
         alert = {
             "title": "Anomaly Detected — Automated Investigation Triggered",
             "severity": "high",
@@ -116,7 +135,6 @@ def run_fault_injection(
             "affected_services": [
                 "cartservice",
                 "checkoutservice",
-                "currencyservice",
                 "frontend",
                 "paymentservice",
                 "productcatalogservice",
@@ -124,10 +142,12 @@ def run_fault_injection(
             ],
         }
 
-        # Live mode: agent queries Prometheus/Loki via tools
-        report = agent.investigate(alert=alert)
+        # Live mode: agent queries Prometheus/Loki via tools.
+        # Pin the metric window to [fault_start_time, fault_start_time+10min]
+        # so this test's signal is isolated from previous tests' residue.
+        report = agent.investigate(alert=alert, start_time=record["fault_start_time"])
 
-        record["investigation_complete_time"] = datetime.now().isoformat()
+        record["investigation_complete_time"] = datetime.now(UTC).isoformat()
         record["detection_latency_seconds"] = (
             datetime.fromisoformat(record["alert_time"])
             - datetime.fromisoformat(record["fault_start_time"])
@@ -175,6 +195,19 @@ def _save_result(record: dict[str, Any], output_dir: Path) -> None:
         json.dump(record, f, indent=2)
 
 
+def _shuffled_faults(faults: list[str], seed: int) -> list[str]:
+    """Deterministically shuffle fault_type names using a given seed.
+
+    Shuffling spreads destructive faults (service_crash, cascading_failure)
+    across the run so that their residue (probe_up=0 for ~5min post-restart)
+    doesn't always pollute the same downstream test. Per-fault runs remain
+    sequential so per-fault cooldowns still apply correctly.
+    """
+    shuffled = list(faults)
+    random.Random(seed).shuffle(shuffled)
+    return shuffled
+
+
 def _load_per_fault_cooldowns(
     config_path: str = "configs/evaluation_scenarios.yaml",
 ) -> dict[str, int]:
@@ -208,6 +241,15 @@ def main() -> None:
         default=120,
         help="Max seconds to wait for anomaly detection per test (default: 120)",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help=(
+            "Random seed used to shuffle fault_type order when running all "
+            "fault types (default: 42). Ignored when --fault is set."
+        ),
+    )
     args = parser.parse_args()
 
     from src.agent.executor import AgentExecutor
@@ -217,7 +259,19 @@ def main() -> None:
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    faults = [args.fault] if args.fault else list(FAULT_SCRIPTS.keys())
+    if args.fault:
+        if args.fault not in FAULT_SCRIPTS:
+            known = ", ".join(sorted(FAULT_SCRIPTS.keys()))
+            print(
+                f"Error: '{args.fault}' is not a registered fault type. "
+                f"Known fault types: {known}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        faults = [args.fault]
+    else:
+        faults = _shuffled_faults(list(FAULT_SCRIPTS.keys()), args.seed)
+        print(f"Shuffled fault order (seed={args.seed}): {faults}")
     per_fault_cooldown = _load_per_fault_cooldowns()
 
     for fault_type in faults:
