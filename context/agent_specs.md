@@ -437,7 +437,7 @@ def discover_causation(
 
 | Parameter | Value | Rationale |
 |---|---|---|
-| Model | `gemini-2.5-flash-lite` | Cost-effective; strong tool-use capability; fast inference |
+| Model | `gemini-3-flash-preview` | Strong tool-use capability; better contradictory-evidence reasoning than 2.5 Flash Lite (Session 12 swap). Returns `response.content` as a list of parts — normalise via `_extract_text()`. |
 | Temperature | `0.1` | Near-deterministic for consistent, reproducible RCA reasoning |
 | Max output tokens | `4096` | Sufficient for full RCA report with evidence chain |
 | Tool choice | `auto` | LLM decides which tools to call based on investigation state |
@@ -456,7 +456,7 @@ from src.agent.tools.discover_causation import discover_causation
 TOOLS = [query_metrics, search_logs, get_topology, search_runbooks, discover_causation]
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash-lite",
+    model="gemini-3-flash-preview",
     temperature=0.1,
     max_output_tokens=4096,
     google_api_key=os.environ["GEMINI_API_KEY"],

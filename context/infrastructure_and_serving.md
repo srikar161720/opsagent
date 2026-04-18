@@ -10,7 +10,7 @@
 - `infrastructure/loki/loki-config.yml` — Loki storage config
 - `infrastructure/grafana/provisioning/datasources/datasources.yml` — Grafana datasources
 - `infrastructure/grafana/dashboards/service_overview.json` — Main dashboard
-- `demo_app/fault_scenarios/0{1-8}_*.sh` — Fault injection scripts (8 types)
+- `demo_app/fault_scenarios/0{1-8}_*.sh` — Fault injection scripts (7 active + 1 retained out-of-scope: `04_cpu_throttling.sh` was removed from `FAULT_SCRIPTS` in Session 12 — undetectable on idle demo)
 - `src/serving/api.py` — FastAPI application
 - `src/serving/dashboard.py` — Streamlit dashboard
 - `Dockerfile` — OpsAgent container image
@@ -753,7 +753,7 @@ echo "$(date -Iseconds) - FAULT_END: $SERVICE config restored" | tee -a /tmp/fau
 | Day 3 | connection_exhaustion, network_partition | 5 | 10 |
 | Day 4 | cascading_failure, config_error | 5 | 10 |
 | Day 5 | False-positive check (24h normal operation) | — | — |
-| **Total** | **8 fault types** | **5 each** | **40 tests** |
+| **Total** | **7 active fault types** | **5 each** | **35 tests** (Session 12: `cpu_throttling` removed — undetectable on idle demo) |
 
 ---
 
@@ -1319,7 +1319,7 @@ CHROMADB_PATH=data/chromadb
 # ── Agent Configuration ───────────────────────────────────────────────────────
 AGENT_MAX_TOOL_CALLS=10
 AGENT_CONFIDENCE_THRESHOLD=0.7
-LLM_MODEL=gemini-2.5-flash-lite
+LLM_MODEL=gemini-3-flash-preview
 LLM_TEMPERATURE=0.1
 
 # ── Anomaly Detection ─────────────────────────────────────────────────────────
@@ -1342,7 +1342,7 @@ class Settings(BaseSettings):
     kafka_bootstrap_servers: str = "localhost:9092"
     agent_max_tool_calls: int = 10
     agent_confidence_threshold: float = 0.7
-    llm_model: str = "gemini-2.5-flash-lite"
+    llm_model: str = "gemini-3-flash-preview"
     llm_temperature: float = 0.1
 
     class Config:

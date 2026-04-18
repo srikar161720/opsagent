@@ -131,7 +131,7 @@ LLM backend, investigation loop controls, per-tool parameters, and causal discov
 
 agent:
   llm:
-    model: "gemini-2.5-flash-lite"   # Primary LLM for reasoning and report generation
+    model: "gemini-3-flash-preview"  # Primary LLM for reasoning and report generation
     temperature: 0.1            # Near-deterministic for reproducible RCA reports
     max_output_tokens: 4096     # Sufficient for a complete RCA report
     # API key: loaded from GEMINI_API_KEY environment variable via python-dotenv
@@ -277,7 +277,9 @@ Defines all 8 OTel Demo fault injection scenarios and controls the evaluation ru
 # Full evaluation procedures: context/evaluation_strategy.md
 
 # ─── OTel Demo Fault Scenarios ──────────────────────────────────────────────
-# 8 fault types × 5 repetitions = 40 total test cases
+# 7 fault types × 5 repetitions = 35 total test cases (cpu_throttling removed
+# in Session 12 — undetectable on the idle demo; 04_cpu_throttling.sh retained
+# for reference but NOT in FAULT_SCRIPTS).
 # Run order: easy → medium → hard (Days 1-2: easy; Day 3: medium/hard)
 fault_types:
   - name: "service_crash"
@@ -357,7 +359,7 @@ fault_types:
 
 # ─── Evaluation Runner Settings ─────────────────────────────────────────────
 evaluation:
-  repetitions_per_fault: 5            # 8 faults × 5 runs = 40 total OTel Demo test cases
+  repetitions_per_fault: 5            # 7 faults × 5 runs = 35 total OTel Demo test cases (Session 12: cpu_throttling removed)
   baseline_duration_hours: 24         # Baseline collection period (normal operation)
   results_output_path: "data/evaluation/results/"
   explanation_quality_scores_path: "data/evaluation/explanation_quality_scores.csv"

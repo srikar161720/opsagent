@@ -22,7 +22,7 @@ OpsAgent is evaluated across three independent tracks that collectively answer d
 
 | Track | Dataset | Cases | Primary Question |
 |---|---|---|---|
-| **Track 1: Primary (Fault Injection)** | OpenTelemetry Demo | 40 (8 types × 5 runs) | Does OpsAgent correctly identify root causes in its target environment? |
+| **Track 1: Primary (Fault Injection)** | OpenTelemetry Demo | 35 (7 types × 5 runs) | Does OpsAgent correctly identify root causes in its target environment? |
 | **Track 2: Cross-System Validation** | RCAEval RE1/RE2/RE3 | 736 total | Does OpsAgent generalize beyond its training environment? |
 | **Track 3: AD Benchmark** *(Nice-to-Have)* | LogHub HDFS | ~558K block sequences | How accurately does the LSTM-AE detect anomalies on a labeled benchmark? |
 
@@ -43,7 +43,7 @@ OpsAgent is evaluated across three independent tracks that collectively answer d
 
 | Week | Activities |
 |---|---|
-| Week 9 | Implement fault injection scripts; run all 40 OTel Demo tests (8 fault types × 5 runs, single-day execution ~3.5-4 hours); evaluate 3 internal baselines |
+| Week 9 | Implement fault injection scripts; run all 35 OTel Demo tests (7 fault types × 5 runs, single-day execution ~3 hours); evaluate 3 internal baselines. (Session 12: `cpu_throttling` removed — undetectable on idle demo, see `CLAUDE.md` gotcha.) |
 | Week 10 Days 1–2 | Run OpsAgent against RCAEval RE1 (375 cases), RE2 (271 cases), RE3 (90 cases) |
 | Week 10 Days 3–5 | Calculate all metrics; manually score 25–30 RCA reports; create Visualizations 1–9; run statistical analysis; draft `docs/evaluation_results.md`; *(nice-to-have: run HDFS benchmark + Visualizations 10–11 if time permits)* |
 
@@ -70,21 +70,23 @@ OpsAgent is evaluated across three independent tracks that collectively answer d
 
 ### 2.2 Test Schedule
 
-All 40 tests are run in a single session (~3.5-4 hours), ordered from easy to hard:
+All 35 tests are run in a single session (~3 hours). Session 12 added deterministic shuffled ordering via a `--seed` flag (default 42) in `fault_injection_suite.py` — running easy-to-hard is no longer strict, but the shuffle is reproducible across runs.
 
 | Batch | Fault Types | Runs Each | Tests | Est. Time |
 |---|---|---|---|---|
 | 1 | service_crash, high_latency | 5 | 10 | ~50 min |
-| 2 | memory_pressure, cpu_throttling | 5 | 10 | ~65 min |
+| 2 | memory_pressure | 5 | 5 | ~30 min |
 | 3 | connection_exhaustion, network_partition | 5 | 10 | ~55 min |
 | 4 | cascading_failure, config_error | 5 | 10 | ~65 min |
-| **Total** | 8 types | 5 each | **40 tests** | **~4 hours** |
+| **Total** | **7 types** | 5 each | **35 tests** | **~3 hours** |
 
-**False positive test (separate):** Run the system under 24h normal operation (no faults) and count any alerts fired. This provides the `false_positives` count for the Precision metric. Can be run before or after the 40 fault injection tests — it does not block them.
+> `cpu_throttling` was removed from the active suite in Session 12. The fault (`docker update --cpus 0.1 productcatalogservice`) never bites because the idle demo's productcatalogservice baseline CPU is 0.09% of a core — well below any reasonable cap. The script `04_cpu_throttling.sh` is retained for reference (useful once the demo gets load-tested) but absent from `FAULT_SCRIPTS` in `tests/evaluation/fault_injection_suite.py`.
 
-**Per-test timing:** ~60s wait (for fault to manifest in metrics) + ~15-30s investigation + ~15-30s restore + cooldown (120-240s per fault type from `evaluation_scenarios.yaml`).
+**False positive test (separate):** Run the system under 24h normal operation (no faults) and count any alerts fired. This provides the `false_positives` count for the Precision metric. Can be run before or after the 35 fault injection tests — it does not block them.
 
-**Cooldown between tests:** Per-fault, as defined in `configs/evaluation_scenarios.yaml` (120–240 seconds). Cascading failures use the longest cooldown (240s) to allow full downstream recovery; simple crashes use the shortest (120s). The `_load_per_fault_cooldowns()` helper in the test runner reads these values automatically.
+**Per-test timing:** ~120s wait (for fault to manifest in metrics; upgraded from 60s in Session 11) + ~15-50s investigation + ~15-30s restore + cooldown (120-300s per fault type from `evaluation_scenarios.yaml`).
+
+**Cooldown between tests:** Per-fault, as defined in `configs/evaluation_scenarios.yaml` (120–300 seconds). Destructive faults (`service_crash`, `cascading_failure`) use 300s because their `docker compose stop/restart` leaves probe_up=0 residue in the 10-min query window for ~5 min after restore; other faults use 120–180s. The `_load_per_fault_cooldowns()` helper in the test runner reads these values automatically.
 
 ### 2.3 Automated Test Runner
 
@@ -692,7 +694,7 @@ Three internal baselines are evaluated against OTel Demo fault injection results
 ### 7.1 Scope and Sample Size
 
 - **Minimum:** 25 reports manually scored (OTel Demo only)
-- **Recommended:** 30 reports covering all 8 fault types (≥ 3 per type)
+- **Recommended:** 28 reports covering all 7 active fault types (≥ 4 per type)
 - RCAEval reports are **not** manually scored — only Recall@1/Recall@3 apply there
 
 ### 7.2 Scoring Rubric (1–5 Scale)
@@ -1085,8 +1087,8 @@ is the relevant finding for this project.
 ## 11. Evaluation Deliverables Checklist
 
 ### Track 1 — OTel Demo
-- [ ] All 8 fault injection scripts working and tested
-- [ ] 40 fault injection tests completed (5 × 8 fault types)
+- [x] 8 fault injection scripts created (`04_cpu_throttling.sh` retained but out-of-scope)
+- [ ] 35 fault injection tests completed (5 × 7 active fault types; `cpu_throttling` excluded)
 - [ ] 24h false positive test completed
 - [ ] Per-test JSONs in `data/evaluation/results/`
 - [ ] 25–30 explanation quality scores in `explanation_quality_scores.csv`

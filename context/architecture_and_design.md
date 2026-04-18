@@ -178,9 +178,9 @@ Three complementary sources, each with a non-overlapping role:
 │                     │                       │                             │
 │  LogHub (HDFS)      │  OpenTelemetry Demo   │  RCAEval (RE1 / RE2 / RE3)  │
 │  • 11M+ logs        │  • 24h baseline data  │  • RE1: 375 cases (metrics) │
-│  • Block-level      │  • 8 fault types      │  • RE2: 271 cases (multi-   │
+│  • Block-level      │  • 7 fault types      │  • RE2: 271 cases (multi-   │
 │    anomaly labels   │  • 5 runs each        │    modal: metrics+logs)     │
-│  • ~1GB on disk     │  • 40 test cases      │  • RE3: 90 cases (code-     │
+│  • ~1GB on disk     │  • 35 test cases      │  • RE3: 90 cases (code-     │
 │                     │  • Known ground truth │    level faults)            │
 │  Purpose:           │                       │  • 736 total labeled cases  │
 │  Transfer learning  │  Purpose:             │                             │
@@ -247,7 +247,7 @@ Every significant choice is recorded here with the rationale, so the same ground
 
 **Serving (2):** FastAPI (`POST /investigate`, `GET /health`, `GET /topology`), Streamlit dashboard
 
-**Evaluation (4):** Fault injection suite (8 types × 5 runs), RCAEval evaluation runner (736 cases), 3 internal baselines, metrics calculator
+**Evaluation (4):** Fault injection suite (7 active types × 5 runs = 35 tests; `cpu_throttling` removed Session 12), RCAEval evaluation runner (736 cases), 3 internal baselines, metrics calculator
 
 **Total MVP effort estimate: 185–235 hours**
 

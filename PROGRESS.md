@@ -197,7 +197,7 @@
 - [x] Create `tests/unit/test_baseline_comparison.py` — 17 tests across 4 classes
 - [x] Create `tests/unit/test_inject_faults.py` — 8 tests across 2 classes
 - [x] End-to-end single-fault test verified: `service_crash` → Recall@1=100%, Recall@3=100%, MTTR=15.3s
-- [ ] Run 40 OTel Demo fault injection tests (8 fault types × 5 runs); save results to `data/evaluation/results/`
+- [ ] Run OTel Demo fault injection tests — 40 tests completed Session 11 (27.5% Recall@1 / 40% Recall@3); suite resized to **35 tests (7 types × 5 reps)** in Session 12 after diagnosis showed `cpu_throttling` is undetectable on the idle demo. Session 12 re-run achieved **42.9% Recall@1 / 68.6% Recall@3**. Tier 4/5 follow-ups (Fix 17 crash-log CRITICAL, Fix 18-ext sweep, Fix 21 knockout node) implemented + unit-verified — next full-suite re-run pending.
 - [ ] Evaluate 3 internal baselines: Rule-Based, AD-Only, LLM-Without-Tools
 
 ### RCAEval Cross-System Evaluation (Week 10, Days 1–2)
@@ -970,3 +970,119 @@
 - Redis deprioritization in system prompt had dramatic effect: false Redis predictions dropped from 23/40 → 3/40. But side effect: cartservice over-prediction emerged in Run 7 (19/40), likely due to cross-test state pollution after service_crash/cascading_failure tests.
 - All 7 test runs used v1.10.0 OTel Demo images (except Run 1 which used v1.7.0 before the trace export issue was discovered).
 - Cross-run trend: Recall@3 improved steadily (32.5% → 47.5% → 52.5%) as the pipeline matured. The correct service is increasingly found in the top 3, but Recall@1 (pick correctly as #1) plateaus around 22-27% due to LLM reasoning inconsistency and cross-test state pollution.
+
+---
+
+### 2026-04-18 — Session 12
+
+**Phase:** Phase 5 — Evaluation (Week 9 — Deep-dive diagnosis + Tier 1/2/3/4/5 fixes + 35-test re-run)
+**Duration:** ~30 hours (multi-day deep-dive, plan, implementation, test runs, iterative debug, Tier 4/5 implementation)
+
+**Completed:**
+
+*Deep-dive diagnosis (Session-12 start):*
+- Wrote a full architectural diagnosis of Session 11's 27.5% Recall@1 plateau identifying 17 root causes tiered by impact. Captured in an approved plan file at `/Users/srikarpottabathula/.claude/plans/sparkling-booping-iverson.md`.
+- Key findings: cartservice prediction bias (22/40 = 55% in Session 11); PC algorithm effectively disabled (`min_len < 10` bailout because of empty spanmetric series); LLM reasoning weakness (Gemini 2.5 Flash Lite); `{causal_graph_ascii}` report-template placeholder bug; cross-test metric pollution in the 10-min window; `cpu_throttling` fundamentally unobservable on idle demo (productcatalogservice baseline CPU 0.09% of a core).
+- Reviewed the user's decision-flow via `AskUserQuestion`: chose `gemini-3-flash-preview`, new `sweep_probes_node` with bypassed tool budget, retarget `config_error` to productcatalogservice, `[start_time, start_time + time_range_minutes]` window semantics, retain 5-reps × 8 faults initially.
+
+*Phase A — Isolated non-breaking changes:*
+- **Fix 1 — LLM swap to `gemini-3-flash-preview`**: updated `src/agent/graph.py:_get_llm`, `configs/agent_config.yaml`, `tests/conftest.py`, `tests/evaluation/baseline_comparison.py`, `CLAUDE.md`, `README.md`, `.env.example` comment.
+- **Fix 3 — System prompt rewrite**: `src/agent/prompts/system_prompt.py` — replaced the two cartservice-only examples with 7 fault-family examples (one per real fault type). Added an explicit anti-bias directive. Later also added a currencyservice baseline-noise warning (see Session 12 regression below).
+- **Fix 13 — Destructive-fault cooldowns**: `configs/evaluation_scenarios.yaml` — `service_crash` 120s → **300s**, `cascading_failure` 240s → **300s** to give the 10-min query window time to flush probe_up=0 residue.
+- **Fix 15 — config_error retarget**: `demo_app/fault_scenarios/08_config_error.sh` now targets **productcatalogservice** with `PRODUCT_CATALOG_SERVICE_PORT=999999` + `--restart on-failure` (invalid-port crash-loop). Validated live: triggers clean probe_up=0 + sparse/stale CRITICAL. `GROUND_TRUTH["config_error"]` updated in `fault_injection_suite.py`.
+
+*Phase B — Tool-layer semantics:*
+- **Fix 5 — `probe_latency` baseline contamination**: `query_metrics.py` now computes `baseline_mean` from the first 60% of the window (or anchor-based when `start_time` is pinned) before the 10× ratio check. Under a pinned window, pre-anchor points are used as baseline directly. Live verified: 500ms netem on frontend → current=1.02s vs baseline_mean=0.016s = **63× increase**, CRITICAL fires.
+- **Fix 6 — `probe_up` fresh-drop check**: added a parallel trigger: `baseline_mean ≥ 0.9 AND last 2 readings == 0`. Catches just-dropped services that the 3-of-4-zeros rule misses at 120s wait. Also tightened the `was_healthy` guard to `baseline_mean ≥ 0.7` to prevent currencyservice baseline crash-loop (probe_up mean ~0.2) from firing CRITICAL.
+- **Fix 7 — Remove `probe_up`/`probe_latency` from `_app_metrics`**: probe metrics now participate in sparse/stale CRITICAL detection. Added exporter-unavailable guard: if the probe exporter returns no series at all, degrades to a neutral note instead of CRITICAL.
+- **Fix 8 — Zero-fill + NaN filter in `MetricsCollector`**: `get_service_metrics` now zero-fills missing Prometheus series (instead of returning `[]`) and coerces `NaN` values from `histogram_quantile` to 0.0. Prevents `min_len<10` bailout in `discover_causation` when any service has no data for one metric. Also added `_parse_step_seconds` helper.
+- **Fix 9 — Decouple PC from spanmetrics**: dropped `request_rate`, `error_rate`, `latency` from `_CAUSAL_METRICS`. PC input is now 6 metrics × 5 services × 2 lags = 60 columns (all container-level or probe). Services that don't export traces no longer block PC.
+- **Fix 11 — Soft PC `min_len` gate**: changed from `min_len < 10` hard bail to `min_len < 6 OR short_frac > 0.30`. Also post-lag length gate lowered 10→8. PC now runs with partial data.
+- Empty-container-metric CRITICAL softened: returns neutral note instead of CRITICAL when a container metric has no data at all — prevents currencyservice memory_usage-missing from being flagged as a fault.
+
+*Phase C — Graph/executor changes:*
+- **Fix 4 — Python-side report template substitution**: `generate_report_node` now pre-fills the `RCA_REPORT_TEMPLATE` with `str.format()` for structural slots (title, timestamp, severity, confidence, root cause, causal_graph_ascii, counterfactual) and replaces sentinel tokens (`__OPS_SUMMARY__`, `__OPS_EVIDENCE_CHAIN__`, …) with the LLM's JSON free-text output. Fallback dumps raw LLM output into `summary` if JSON parsing fails. Added final sanitisation that replaces leftover `{placeholder}` with `"N/A"`. New helper `_parse_report_fields()`.
+- **Fix 12 — Per-test metric snapshotting via `start_time`**: added `start_time: str | None` parameter to `AgentExecutor.investigate()`, `query_metrics()`, `search_logs()`, `discover_causation()`, and the `AgentState` TypedDict. When set, tools query `[anchor - 60s, min(anchor + time_range_minutes, now)]` — the 60s pre-anchor extension preserves pre-fault baseline data. `end` is clamped to `now` to avoid querying the future. Baseline for CRITICAL checks switched to anchor-based split (points before anchor_ts) when `start_time` is pinned. `fault_injection_suite.py` now passes `start_time=record["fault_start_time"]` so each test sees an isolated window.
+- **Fix 10 — `critical_services` priors into PC**: `discover_causation` accepts an optional `critical_services` kwarg; excludes those services from the PC input, synthesises high-confidence (`0.9`) edges from each critical service to each surviving downstream, and overrides `root_service` to the first critical service with `best_confidence ≥ 0.75`. `analyze_causation_node` extracts `critical_services` from evidence before invoking PC and passes it in.
+- **Fix 2 — New `sweep_probes_node`**: second graph node (after `analyze_context`). Initially queried `probe_up` for every affected service; later extended to `probe_up` + `probe_latency` + (in Tier 4/5) `cpu_usage` + `memory_usage` + log-crash-sweep. **Bypasses `tool_calls_remaining`** — mandatory infrastructure, not LLM-directed reasoning. Pre-populates `state["evidence"]` with `args["pre_gathered"] = True`. Emits a summary `AIMessage` listing CRITICAL vs clean services.
+
+*Phase D — Eval harness:*
+- **Fix 14 — Randomized fault order with seed**: `--seed` CLI arg added to both `fault_injection_suite.py` and `scripts/inject_faults.py`. New `_shuffled_faults(faults, seed)` helper produces deterministic permutations per seed. Default seed=42.
+
+*Run 1 (35 tests, Session 12) — results:*
+- Recall@1: **15/35 = 42.9%** (95% CI [26.5%, 59.3%])
+- Recall@3: **24/35 = 68.6%** (95% CI [53.2%, 84.0%])
+- Inconclusive predictions: **0/35** (was 5/40 = 12.5% in Session 11)
+- Per-fault breakdown:
+  - config_error: **100%** (0% in Session 11 — retarget win)
+  - connection_exhaustion: 60% (20% prior)
+  - network_partition: 40% (0% prior)
+  - memory_pressure: 20% (flat)
+  - high_latency: 0% (flat — blocked by truncation bug)
+  - service_crash: 60% (vs 80% prior)
+  - cascading_failure: 20% (vs 80% prior — bias-removal regression: `redis` picked 3/5 times because cart-stop→redis-idle correlation misleads PC)
+- cartservice top-1 concentration: 55% → **31%** (bias reduced)
+- New productcatalogservice over-prediction: 8% → 31% (config_error example in prompt may have created a new bias)
+
+*Session-12 diagnosis of remaining 20 misses (autopsy):*
+- 11/20 misses: GT never considered (system blind)
+- 8/20 misses: GT in top-3 but ranked below another hyp
+- 1/20 misses: root-cause override flipped LLM's correct top-1 (stale CRITICAL cross-contamination from prior service_crash test)
+- Identified systemic cause: **`evidence[].finding` is truncated to 500 chars and the `"CRITICAL"` substring sits past the cutoff** (timestamps array dominates the first 500 chars). `analyze_causation_node`'s string-scan for CRITICAL doesn't fire → `critical_services` stays empty → Fix 10 override bypassed → PC picks a weaker candidate.
+
+*Tier 4/5 implementation (Session-12 follow-up to the 35-test autopsy):*
+- **Fix 17 — Logs as CRITICAL signal**: `src/agent/tools/search_logs.py` — added `_CRASH_PATTERNS` (OOMKilled, SIGKILL/SIGSEGV, panic, std::logic_error, terminate, fatal error, unhandled exception, exit 137/139, listen-tcp-bind failure, core dumped, connection refused, max clients reached) and `_detect_crash_signal()` helper. When ≥3 matches attributable to a specific `service_filter`, the tool now returns `critical_service`, `anomalous=True`, and a `"CRITICAL: <svc> logs show N crash/fault pattern matches…"` note. Threshold chosen to filter single-line transient warnings.
+- **Fix 18-ext — Extended sweep**: `sweep_probes_node` now queries **4 metrics** per service (`probe_up`, `probe_latency`, `cpu_usage`, `memory_usage`) AND runs a per-service `search_logs` with the crash query pattern. 6 services × 4 metrics + 6 log calls = **30 sweep calls per investigation**, all bypassing the tool budget.
+- **Direct `args["critical"]` flag (architecturally required for Fix 17)**: every sweep evidence entry now carries `args["critical"] = bool` set from the full (un-truncated) tool result. `analyze_causation_node`'s critical-services extraction reads this flag first, falling back to the legacy `"CRITICAL" in finding` string-scan for LLM-invoked tools that don't set it. Bypasses the 500-char truncation bug for sweep-produced evidence.
+- **Fix 21 — Knockout node**: new `knockout_node` in `src/agent/graph.py`, wired on the "end" branch of the conditional (after `analyze_causation`, before `generate_report`) so it runs once, not per loop. Skips when `confidence ≥ 0.75` or `root_cause in {"", "unknown", "inconclusive"}`. Otherwise counts sweep-evidence `critical=True` entries per candidate (root_cause + top-3 LLM hypotheses). If an alternative has **strictly more** CRITICAL signals than the current root_cause, swap root_cause with a moderate confidence bump (max 0.65, staying below the 0.75 CRITICAL-override band).
+- Graph is now **7 nodes**: START → analyze_context → sweep_probes → form_hypothesis → gather_evidence → analyze_causation → (conditional: continue→form_hypothesis, end→knockout) → generate_report → END.
+- Verified live: Gemini 3 agent correctly identifies `frontend` as root cause for high_latency with 0.75 confidence via the direct `args.critical` flag. `[INFO] CRITICAL override: frontend has stale/sparse metrics (service DOWN)` appears in the log.
+
+*Other fixes / robustness hardening discovered mid-run:*
+- **UTC timestamps in `fault_injection_suite.py`**: `datetime.now()` (local time, no tz) was being passed to tools that interpreted naive timestamps as UTC — effectively querying a window multiple hours in the future. Changed all 5 `datetime.now()` calls to `datetime.now(UTC)`. Every pinned-window test before this fix was querying empty windows → zero-fill → PC bail → "inconclusive".
+- **LogQL OR-alternation handling**: LogQL's `|=` is a literal-substring filter, not a boolean expression. LLM-generated queries like `panic OR fatal OR "bind"` produced 400 Bad Request from Loki (nested quotes terminated the string literal). `search_logs._build_logql()` now detects OR-alternation, converts it to a regex line filter (`|~ \`(?i)term1|term2|…\``), strips embedded quotes/backticks from terms, and uses backtick strings (raw) for the LogQL literal. Also applied to the forced-log-search in `gather_evidence_node`.
+- **Gemini 3 list-of-parts content format**: Gemini 3 Flash Preview returns `response.content` as `[{"type":"text","text":"..."}]` rather than a plain string. All three call sites that read `response.content` (`form_hypothesis_node`, `generate_report_node`, and implicit in the tool-call path) went through `isinstance(..., str) else ""` → discarding all text. Added `_extract_text(response)` helper that normalises both formats and filters out non-text parts (thoughts, signatures). RCA reports went from "Executive Summary: N/A, Evidence Chain: N/A, …" to fully populated.
+- **Leftover `opsagent-tc-sidecar` + stale tc qdisc on frontend**: earlier diagnostic tests left the sidecar + `tc netem delay 500ms` active on frontend's eth0. When the suite tried to re-run `02_high_latency.sh inject`, it got "container name in use" (exit 125). Made `02_high_latency.sh inject` and `restore` both **idempotent**: force-remove any prior sidecar, strip any stale qdisc via a throwaway Alpine container that shares the target's netns, then apply the new netem.
+- **`currencyservice` excluded from `affected_services`**: v1.10.0 currencyservice SIGSEGV crash-loop makes its probe_up=0 and `std::logic_error` crash-logs a permanent baseline state. Surfacing it to the agent via the sweep caused consistent misattribution (LLM saw "one service is clearly down, with crash logs" and blamed it for every fault). `affected_services` in the alert now lists only the **6 legitimate services**. Also added an explicit "currencyservice is BROKEN IN BASELINE — never pick it as root cause" warning to the system prompt.
+
+*Unit + integration tests:*
+- **315 unit tests passing** (was 262 pre-session) + 15 integration tests.
+- New tests cover: `_extract_text` (5 tests — string/list/thought-parts/mixed/missing), `_build_logql` (5 tests — single-term/OR/quotes/backticks/no-filter), `_detect_crash_signal` and crash-signal escalation (3 tests), sweep's direct `args.critical` flag (2 tests), `sweep_probes_node` call counts across 4 metrics + log sweep (1 updated test + 2 new), `knockout_node` (5 tests — skip-high-confidence/skip-unknown/passthrough/flip/tie/ignore-non-sweep), zero-fill + NaN filter in `MetricsCollector` (3 tests), `_parse_step_seconds` (1 test), `start_time` window semantics (2 tests), Gemini 3 model assertion (1 test), system-prompt anti-bias + all-7-services assertions (2 tests), cpu_throttling exclusion (1 test), config_error retarget assertion (1 test), destructive-fault cooldown values (1 test), `--fault unknown` clean-error (1 test), `currencyservice` not in alert (1 test), randomized fault order (4 tests — preserve-set/deterministic/different-seeds/no-mutation).
+- `ruff` clean, `mypy` clean on `src/`.
+
+*cpu_throttling removed from active suite:*
+- Diagnosis showed `docker update --cpus 0.1 productcatalogservice` never forces CPU saturation on the idle demo (baseline 0.09% of a core; even `--cpus 0.005` doesn't bite). Tested `--cpus 0.005` live: `probe_latency 0.0011s → 0.0020s` — too small a signal to detect. Accepted dropping cpu_throttling from the active registry. Script retained at `demo_app/fault_scenarios/04_cpu_throttling.sh` with a header comment noting it is out of scope.
+- Propagated across: `configs/evaluation_scenarios.yaml`, `tests/evaluation/fault_injection_suite.py:FAULT_SCRIPTS/GROUND_TRUTH`, `tests/unit/test_fault_injection_suite.py`, `CLAUDE.md` (new gotcha), `README.md`, shell script header.
+- New `--fault cpu_throttling` on the CLI returns a clean error (not a `KeyError`) listing the 7 valid fault types.
+
+**In Progress:**
+- 35-test re-run after Tier 4/5 implementation is pending — results from this iteration are only from the Tier-1/2/3 run. Unit-test-verified plus live smoke-tested (high_latency correctly identifies frontend at 0.75 confidence); a full re-run is the next step.
+- Documentation: `docs/evaluation_results.md` not yet drafted with the 42.9% / 68.6% results.
+
+**Blockers / Issues:**
+- **cpu_throttling undetectable on idle demo**: `docker update --cpus X` only bites a service that's saturating its CPU. OTel Demo's productcatalogservice baseline is 0.09% of a core — no fault cap short of the Docker minimum can approach a signal without an active load generator hitting productcatalogservice directly. **Resolution:** Removed from suite; retained script for future re-use if the demo gets load-tested.
+- **Gemini 3 Flash Preview returns list-of-parts content**: broke every non-tool LLM response handler (discarded all text when `isinstance(content, str)` was False). **Resolution:** `_extract_text()` helper in `graph.py`.
+- **LogQL `|=` doesn't support OR boolean**: LLM-generated `"a OR b OR c"` queries produced 400s at Loki. **Resolution:** `_build_logql()` converts OR to regex `|~` + handles embedded quotes via backtick literals.
+- **Evidence `finding` truncated to 500 chars drops CRITICAL substring**: timestamps array dominates the first 500 chars of the JSON dump; `"CRITICAL"` note at the end gets cut off. `analyze_causation_node`'s string-scan misses legitimate signals. **Resolution (partial, for sweep only):** direct `args["critical"]` boolean flag set from the pre-truncation tool result. LLM-invoked tool calls still rely on the string-scan (acceptable since the sweep covers the high-value pre-hypothesis path).
+- **Stale fault state leakage across tests**: `docker compose stop/restart` for service_crash/cascading_failure leaves probe_up=0 data in the 10-min query window for ~5 min after restore. **Resolution:** 300s cooldowns for destructive faults + per-test `start_time` pinning. Not fully eliminated (one test still showed this pattern: network_partition_run_4 picked cartservice because of residual cartservice=0 history).
+- **UTC vs local time in `fault_injection_suite.py`**: `datetime.now().isoformat()` returned local time without a tz suffix; tool code then treated it as UTC. **Resolution:** all 5 `datetime.now()` calls in the file use `datetime.now(UTC)` now.
+- **Leftover sidecar + tc qdisc from diagnostic tests**: manual live experimentation before the run left the sidecar + qdisc active, which blocked a clean re-run. **Resolution:** `02_high_latency.sh` inject and restore are now both idempotent.
+- **currencyservice baseline distracting the agent**: v1.10.0 currencyservice crash-loops in baseline, its probe_up=0 and crash-log stream look identical to a real fault. **Resolution:** excluded from `affected_services` + explicit prompt warning.
+- **memory_pressure signal subtle**: 25MB cap on a ~15MB working-set checkoutservice produces modest memory pressure that rarely triggers CRITICAL. Crash-log detection (Fix 17) may help if OOMKilled logs accumulate; Session-12 Tier-1/2/3 run had 20% Recall@1 on this fault.
+
+**Next Session:**
+- **Full 35-test re-run with Tier 4/5 fixes.** Expected Recall@1: 65–85% based on the autopsy (Fix 17 contributes ~4–6 correct predictions; Fix 21 contributes ~3–5). Run with `caffeinate -s env PYTHONUNBUFFERED=1 poetry run python scripts/inject_faults.py --repetitions 5 --seed 42`.
+- Evaluate 3 internal baselines (Rule-Based, AD-Only, LLM-Without-Tools) against the same 35-test suite.
+- Begin Week 10: RCAEval cross-system evaluation on RE1/RE2/RE3 (736 cases total).
+- Draft `docs/evaluation_results.md` with both Recall@1/Recall@3 numbers + per-fault breakdown + comparison against Session 11 (27.5%/40%) baseline.
+
+**Notes:**
+- Graph is now **7 nodes** (was 5): added `sweep_probes` between analyze_context and form_hypothesis, and `knockout` on the end-branch of the conditional. Both sit on non-looping paths (sweep runs once; knockout runs once at end).
+- Default `max_tool_calls` stayed at 10. The 30-call sweep bypasses the budget, so the LLM still gets its full 10-call budget for reasoning + evidence gathering.
+- Window semantics when `start_time` is pinned: `[anchor - 60s, min(anchor + time_range_minutes, now)]`. The 60s pre-anchor extension gives the baseline_mean calibration for CRITICAL checks a pre-fault reference.
+- Baseline_mean calibration under `start_time` pinning: count points with timestamp < anchor; use those as baseline. Falls back to first-60%-of-window when unpinned or when too few pre-anchor points exist.
+- cartservice prediction concentration reduced from 55% (Session 11) to 31% (Session 12). New productcatalogservice bias at 31% is partly the `config_error` retarget success (5/11 correct) and partly the system prompt's Example 7 reinforcing "productcatalogservice ↔ crash-loop" patterns.
+- `currencyservice` is now out of the investigation scope (not in `affected_services`). It continues to crash-loop in baseline (v1.10.0 SIGSEGV), but no longer distracts the agent.
+- Context files updated for new counts: 7 fault types, 35 tests, LLM = `gemini-3-flash-preview`, graph = 7 nodes.
+- `scripts/inject_faults.py` now validates `--fault <unknown>` with a helpful error (listing known types) instead of a `KeyError` traceback. `--seed` flag propagates to the underlying suite.
+- The user requested that git commits be held — all Session 12 changes are uncommitted on `main`. Awaiting manual commit after the Tier 4/5 re-run validates the improvements.
