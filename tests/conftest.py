@@ -278,7 +278,7 @@ def sample_agent_config() -> dict[str, Any]:
     return {
         "agent": {
             "llm": {
-                "model": "gemini-2.5-flash-lite",
+                "model": "gemini-3-flash-preview",
                 "temperature": 0.1,
                 "max_output_tokens": 4096,
             },

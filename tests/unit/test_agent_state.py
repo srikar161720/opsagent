@@ -14,7 +14,7 @@ class TestAgentState:
         # TypedDict subclasses dict
         assert issubclass(AgentState, dict)
 
-    def test_state_has_all_13_fields(self) -> None:
+    def test_state_has_all_expected_fields(self) -> None:
         from src.agent.state import AgentState
 
         annotations = AgentState.__annotations__
@@ -22,6 +22,7 @@ class TestAgentState:
             "alert",
             "anomaly_window",
             "affected_services",
+            "start_time",
             "messages",
             "hypotheses",
             "evidence",
@@ -50,6 +51,7 @@ class TestAgentState:
             "alert": {"title": "test"},
             "anomaly_window": ("2024-01-01", "2024-01-01"),
             "affected_services": ["svc_a"],
+            "start_time": None,
             "messages": [],
             "hypotheses": [],
             "evidence": [],
