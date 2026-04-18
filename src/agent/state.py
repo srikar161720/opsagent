@@ -30,6 +30,11 @@ class AgentState(TypedDict):
     alert: dict
     anomaly_window: tuple
     affected_services: list[str]
+    # Optional pinned start time for all metric/log queries during this
+    # investigation. When set, tools query the window [start_time,
+    # start_time + time_range_minutes] instead of [now - time_range_minutes,
+    # now]. This isolates per-test metric windows from cross-test pollution.
+    start_time: str | None
 
     # ── Investigation state ───────────────────────────────────────────────
     messages: Annotated[list, add_messages]

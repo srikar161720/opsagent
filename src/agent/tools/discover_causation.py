@@ -27,22 +27,19 @@ from src.data_collection.metrics_collector import MetricsCollector
 
 logger = logging.getLogger(__name__)
 
-# Metrics to fetch per service for causal analysis
+# Metrics to fetch per service for causal analysis.
+# Spanmetrics (request_rate / error_rate / latency) were REMOVED because they
+# are only available for services that export traces (frontend, checkoutservice,
+# productcatalogservice, paymentservice). Including them caused PC to bail on
+# every multi-service investigation because non-trace services returned empty
+# series. Container + probe metrics are available for ALL 7 services.
+# Column count: 6 metrics × 5 services × 2 lags = 60 columns — manageable.
 _CAUSAL_METRICS: dict[str, str] = {
     # Container-level metrics (available for all services)
     "cpu": 'rate(container_cpu_usage_seconds_total{service="{service}"}[1m])',
     "memory": 'container_memory_working_set_bytes{service="{service}"}',
     "net_rx": 'rate(container_network_receive_bytes_total{service="{service}"}[1m])',
     "net_tx": 'rate(container_network_transmit_bytes_total{service="{service}"}[1m])',
-    # Application-level metrics (available for services exporting traces)
-    "request_rate": 'sum(rate(span_calls_total{service_name="{service}"}[1m]))',
-    "error_rate": (
-        'sum(rate(span_calls_total{service_name="{service}",status_code="STATUS_CODE_ERROR"}[1m]))'
-    ),
-    "latency": (
-        "histogram_quantile(0.99, "
-        'sum(rate(span_duration_milliseconds_bucket{service_name="{service}"}[1m])) by (le))'
-    ),
     # Service probe metrics (available for all services)
     "probe_up": 'service_probe_up{service="{service}"}',
     "probe_latency": 'service_probe_duration_seconds{service="{service}"}',
@@ -53,6 +50,8 @@ _CAUSAL_METRICS: dict[str, str] = {
 def discover_causation(
     services: list[str],
     time_range_minutes: int = 30,
+    start_time: str | None = None,
+    critical_services: list[str] | None = None,
 ) -> dict:
     """Run the PC causal discovery algorithm to identify causal relationships
     between services and compute counterfactual confidence scores.
@@ -71,11 +70,24 @@ def discover_causation(
             services.  Typically 3-5 services.
         time_range_minutes: Time window of metric data to analyze.
             Default 30 minutes.
+        start_time: Optional ISO-8601 timestamp. When set, the query window
+            is ``[start_time, start_time + time_range_minutes]`` instead of
+            the default ``[now - time_range_minutes, now]``. Used by the
+            evaluation harness to pin a per-test window.
+        critical_services: Services flagged CRITICAL elsewhere in the
+            investigation (probe_up=0, stale metrics, etc.). These services
+            are EXCLUDED from the PC input because their metrics are frozen
+            or missing (PC would see constant columns and either drop them
+            or produce spurious causation signals). Instead, the tool
+            synthesizes high-confidence edges ``critical_svc → other_svc``
+            after PC runs, reflecting the assumption that a down service
+            is the likely upstream cause of anomalies in surviving services.
 
     Returns:
         dict with keys: causal_edges, root_cause, root_cause_confidence,
         counterfactual, graph_ascii.
     """
+    critical_set = set(critical_services or [])
     if len(services) < 2:
         return {
             "causal_edges": [],
@@ -100,25 +112,54 @@ def discover_causation(
     try:
         # 1. Fetch metrics from Prometheus for each service
         collector = MetricsCollector()
-        end = datetime.now(UTC)
-        start = end - timedelta(minutes=time_range_minutes)
+        now = datetime.now(UTC)
+        if start_time:
+            anchor = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+            if anchor.tzinfo is None:
+                anchor = anchor.replace(tzinfo=UTC)
+            # Extend window 60s before the anchor (fault injection time) so
+            # the baseline-stats calculation (first 60% of window) reflects
+            # pre-fault normalcy. Matches query_metrics semantics.
+            start = anchor - timedelta(seconds=60)
+            end = min(anchor + timedelta(minutes=time_range_minutes), now)
+        else:
+            end = now
+            start = end - timedelta(minutes=time_range_minutes)
 
         columns: dict[str, list[float]] = {}
-        for service in services:
+        # PC input excludes critical services — their metrics are frozen or
+        # missing and would produce a singular correlation matrix or
+        # spurious signals. We still fetch their data so we can reason about
+        # them in the synthesized edges below.
+        pc_services = [s for s in services if s not in critical_set]
+        for service in pc_services:
             svc_data = collector.get_service_metrics(
                 service, _CAUSAL_METRICS, start, end, step="15s"
             )
             for metric_name, values in svc_data.items():
                 columns[f"{service}_{metric_name}"] = values
 
-        # Align all columns to the shortest length
+        # Align all columns to the shortest length.
+        # Soft gate: allow partial data. Previously required ALL columns >= 10
+        # points, which bailed whenever any metric was briefly unavailable.
+        # New rule: min_len >= 6 AND at most 30% of columns are "short" (<6).
         if not columns:
             return _inconclusive("No metric data returned from Prometheus.")
 
-        min_len = min(len(v) for v in columns.values())
-        if min_len < 10:
-            return _inconclusive(f"Insufficient data points ({min_len}). Need at least 10.")
+        lengths = [len(v) for v in columns.values()]
+        min_len = min(lengths)
+        short_count = sum(1 for length in lengths if length < 6)
+        short_frac = short_count / len(lengths)
+        if min_len < 6 or short_frac > 0.30:
+            return _inconclusive(
+                f"Insufficient data points (min={min_len}, "
+                f"{short_count}/{len(lengths)} columns are short). "
+                f"Need min>=6 and <=30% short columns."
+            )
 
+        # Truncate all columns to the shortest usable length so the DataFrame
+        # is rectangular. Use min_len — not a "compromise" value — to keep the
+        # alignment exact.
         metrics_df = pd.DataFrame({k: v[:min_len] for k, v in columns.items()})
 
         # Drop zero-variance columns before causal discovery.
@@ -141,7 +182,8 @@ def discover_causation(
         # 2. Create time-lagged features
         # Use lags=[1, 2] instead of [1, 2, 5] to reduce column count.
         lagged_df = create_time_lags(metrics_df, lags=[1, 2])
-        if len(lagged_df) < 10:
+        # Lowered from 10 to 8 to match the softer input gate above.
+        if len(lagged_df) < 8:
             return _inconclusive("Too few rows after time-lag creation.")
 
         # Drop zero-variance lagged columns
@@ -169,7 +211,10 @@ def discover_causation(
 
         # 4. Parse directed edges
         edges = parse_causal_graph(cg, list(lagged_df.columns))
-        if not edges:
+        # Note: if edges is empty AND no critical_services are provided, we
+        # bail out later. If critical_services ARE provided, we proceed with
+        # synthesized edges even when PC found nothing.
+        if not edges and not critical_set:
             return _inconclusive("No directed causal edges discovered.")
 
         # 5. Compute baseline stats (first 60% of data)
@@ -226,6 +271,50 @@ def discover_causation(
 
         # Extract service name from metric column name (e.g. "cartservice_cpu" → "cartservice")
         root_service = _extract_service(root_cause, services)
+
+        # 7b. CRITICAL-service priors: synthesize high-confidence edges from
+        # each critical (DOWN) service to each surviving service. Downstream
+        # targets are derived from PC edges when available, otherwise from
+        # the non-critical service list (so synthesis still runs when PC is
+        # inconclusive). Override root_cause to a critical service.
+        if critical_set:
+            downstream_services: set[str] = set()
+            if scored_edges:
+                downstream_services = {
+                    _extract_service(e.target, services) for e in scored_edges
+                }
+                downstream_services.update(
+                    {_extract_service(e.source, services) for e in scored_edges}
+                )
+            # Fall back to the non-critical service list if PC gave us nothing.
+            if not downstream_services:
+                downstream_services = set(pc_services)
+            # Remove critical services from the set — don't synthesize self-edges.
+            downstream_services -= critical_set
+            for crit_svc in critical_set:
+                for tgt_svc in downstream_services:
+                    scored_edges.append(
+                        CausalEdge(
+                            source=f"{crit_svc}_probe_up",
+                            target=f"{tgt_svc}_probe_up",
+                            confidence=0.90,
+                            lag=1,
+                            evidence=(
+                                f"{crit_svc} is DOWN per probe_up CRITICAL — "
+                                f"synthesized edge to downstream {tgt_svc}"
+                            ),
+                        )
+                    )
+            # Override root cause to the critical service with strong confidence.
+            # Pick the first critical service (stable via sorted set below).
+            root_service = sorted(critical_set)[0]
+            best_confidence = max(best_confidence, 0.75)
+            best_explanation = (
+                f"Root cause override: {root_service} is DOWN (probe_up CRITICAL). "
+                f"Synthesized edges from {root_service} to "
+                f"{len(downstream_services)} downstream service(s). "
+                + best_explanation
+            )
 
         # 8. Build CausalGraph
         causal_graph = CausalGraph(
