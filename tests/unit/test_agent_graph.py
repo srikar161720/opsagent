@@ -113,6 +113,28 @@ class TestSystemPrompt:
 
         assert "Do not default to any service" in SYSTEM_PROMPT
 
+    def test_memory_metrics_documented(self) -> None:
+        """The two new memory-saturation metrics must be listed in the
+        "Available Metrics" section so the LLM knows they exist."""
+        from src.agent.prompts.system_prompt import SYSTEM_PROMPT
+
+        assert "memory_limit" in SYSTEM_PROMPT
+        assert "memory_utilization" in SYSTEM_PROMPT
+
+    def test_memory_pressure_example_updated(self) -> None:
+        """The old OOMKilled-focused Example 3 was inaccurate — Go/JVM
+        runtimes adapt to soft memory pressure without emitting OOMKilled
+        log lines. The new example must steer the LLM to memory_utilization
+        CRITICAL instead of OOM logs."""
+        from src.agent.prompts.system_prompt import SYSTEM_PROMPT
+
+        # Old copy-paste string from the pre-fix prompt
+        assert "OOMKilled entries" not in SYSTEM_PROMPT
+        # New guidance must explicitly reference the utilization metric near
+        # the memory_pressure example.
+        assert "memory_utilization" in SYSTEM_PROMPT
+        assert "memory pressure" in SYSTEM_PROMPT.lower()
+
 
 class TestBuildGraph:
     """Tests for graph compilation."""
@@ -217,8 +239,11 @@ class TestSweepProbesNode:
         return out
 
     def test_sweeps_all_affected_services(self) -> None:
-        """Every service must be queried across 4 metrics AND one crash-log
-        search. 6 services × 4 metrics + 6 log calls = 30 total sweep calls."""
+        """Every service must be queried across 5 metrics AND one crash-log
+        search. 6 services × 5 metrics + 6 log calls = 36 total sweep calls.
+        The 5th channel is memory_utilization, which catches memory saturation
+        faults where the service adapts (no crash, no probe_up=0) but working
+        set clamps at the cgroup limit."""
         from src.agent import graph
 
         with (
@@ -237,24 +262,28 @@ class TestSweepProbesNode:
             }
             result = graph.sweep_probes_node(state)
 
-        # 6 services × 4 metrics = 24 metric calls
-        assert mock_qm.invoke.call_count == 24
+        # 6 services × 5 metrics = 30 metric calls
+        assert mock_qm.invoke.call_count == 30
         # 6 services × 1 crash-log call = 6 log calls
         assert mock_lg.invoke.call_count == 6
 
-        # Every metric call hits one of the 4 sweep metrics, evenly distributed
+        # Every metric call hits one of the 5 sweep metrics, evenly distributed
         metrics = [
             (call.args[0] if call.args else call.kwargs)["metric_name"]
             for call in mock_qm.invoke.call_args_list
         ]
-        for m in ("probe_up", "probe_latency", "cpu_usage", "memory_usage"):
+        for m in (
+            "probe_up",
+            "probe_latency",
+            "cpu_usage",
+            "memory_usage",
+            "memory_utilization",
+        ):
             assert metrics.count(m) == 6
 
-        # Evidence has 24 metric + 6 log = 30 sweep entries
-        sweep_evidence = [
-            e for e in result["evidence"] if e.get("args", {}).get("pre_gathered")
-        ]
-        assert len(sweep_evidence) == 30
+        # Evidence has 30 metric + 6 log = 36 sweep entries
+        sweep_evidence = [e for e in result["evidence"] if e.get("args", {}).get("pre_gathered")]
+        assert len(sweep_evidence) == 36
 
     def test_critical_flag_propagated_to_args(self) -> None:
         """When a metric result has CRITICAL in its note, the evidence
@@ -301,6 +330,7 @@ class TestSweepProbesNode:
             patch("src.agent.tools.search_logs.search_logs") as mock_lg,
         ):
             mock_qm.invoke = MagicMock(return_value=self._fake_metric_result())
+
             # checkoutservice crashing; others clean.
             def lg_side(largs: dict) -> dict:
                 svc = largs["service_filter"]

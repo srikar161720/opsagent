@@ -269,9 +269,7 @@ class TestQueryMetrics:
 
         mock_instance = mock_cls.return_value
         mock_instance.range_query.return_value = []
-        result = query_metrics.invoke(
-            {"service_name": "frontend", "metric_name": "probe_up"}
-        )
+        result = query_metrics.invoke({"service_name": "frontend", "metric_name": "probe_up"})
         assert result["anomalous"] is False
         assert "probe exporter unavailable" in result.get("note", "")
 
@@ -335,6 +333,148 @@ class TestQueryMetrics:
         # end should be within a few seconds of now, NOT 8 minutes in future
         assert abs((actual_end - now).total_seconds()) < 5
 
+    # ── memory_utilization CRITICAL detector ──────────────────────────────
+    #
+    # memory_utilization is the ratio container_memory_working_set_bytes /
+    # container_spec_memory_limit_bytes. CRITICAL fires when current is ≥0.80
+    # AND baseline_mean ≤ 0.50 — i.e. utilization roughly doubled into the
+    # high band. The baseline bound guards against services that are always
+    # close to their cap from being permanently flagged.
+
+    def test_metric_promql_contains_memory_limit_and_utilization(self) -> None:
+        from src.agent.tools.query_metrics import METRIC_PROMQL
+
+        assert "memory_limit" in METRIC_PROMQL
+        assert "memory_utilization" in METRIC_PROMQL
+        assert "container_spec_memory_limit_bytes" in METRIC_PROMQL["memory_limit"]
+        # The ratio metric must reference both the working-set numerator and
+        # the limit denominator so Prometheus can join on matching labels.
+        util = METRIC_PROMQL["memory_utilization"]
+        assert "container_memory_working_set_bytes" in util
+        assert "container_spec_memory_limit_bytes" in util
+
+    @patch("src.agent.tools.query_metrics.MetricsCollector")
+    def test_memory_utilization_critical_fires_on_saturation(self, mock_cls: MagicMock) -> None:
+        """Baseline ~8% for 24 points → fault ~85% for 16 points must fire
+        CRITICAL with baseline_mean in stats (mirrors the probe_latency
+        10x-spike detector shape)."""
+        from src.agent.tools.query_metrics import query_metrics
+
+        values = [0.08] * 24 + [0.85] * 16
+        mock_instance = mock_cls.return_value
+        mock_instance.range_query.return_value = self._mock_range_response(values)
+        result = query_metrics.invoke(
+            {
+                "service_name": "checkoutservice",
+                "metric_name": "memory_utilization",
+                "time_range_minutes": 10,
+            }
+        )
+        assert result["anomalous"] is True
+        assert "CRITICAL" in result["note"]
+        assert "baseline_mean" in result["stats"]
+        assert result["stats"]["baseline_mean"] <= 0.50
+        assert result["stats"]["current"] >= 0.80
+
+    @patch("src.agent.tools.query_metrics.MetricsCollector")
+    def test_memory_utilization_no_fire_when_baseline_already_high(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """A service legitimately running near its cap (baseline_mean > 0.50)
+        must NOT be flagged even when current >= 0.80 — this would be a
+        constant-state service, not a fault."""
+        from src.agent.tools.query_metrics import query_metrics
+
+        values = [0.70] * 24 + [0.85] * 16
+        mock_instance = mock_cls.return_value
+        mock_instance.range_query.return_value = self._mock_range_response(values)
+        result = query_metrics.invoke(
+            {
+                "service_name": "cartservice",
+                "metric_name": "memory_utilization",
+                "time_range_minutes": 10,
+            }
+        )
+        assert "CRITICAL" not in result.get("note", "")
+
+    @patch("src.agent.tools.query_metrics.MetricsCollector")
+    def test_memory_utilization_no_fire_at_moderate_usage(self, mock_cls: MagicMock) -> None:
+        """Current below 0.80 does not fire regardless of baseline movement."""
+        from src.agent.tools.query_metrics import query_metrics
+
+        values = [0.08] * 24 + [0.70] * 16
+        mock_instance = mock_cls.return_value
+        mock_instance.range_query.return_value = self._mock_range_response(values)
+        result = query_metrics.invoke(
+            {
+                "service_name": "checkoutservice",
+                "metric_name": "memory_utilization",
+                "time_range_minutes": 10,
+            }
+        )
+        assert "CRITICAL" not in result.get("note", "")
+
+    @patch("src.agent.tools.query_metrics.MetricsCollector")
+    def test_memory_utilization_fires_despite_gc_dip_at_tail(self, mock_cls: MagicMock) -> None:
+        """Regression test for the smoke-run failure observed on 2026-04-18.
+
+        Go/JVM runtimes GC-cycle under a tight cgroup cap: the working set
+        spends most of the fault window at ~85% of the limit but dips on
+        each collection. A GC dip right before the 120 s investigation mark
+        (working set briefly down to ~57% of limit) used to produce
+        ``values[-1] == 0.572`` — below the 0.80 threshold — causing the
+        detector to miss the fault entirely. Switching the fire condition
+        to the window ``peak`` catches the sustained-saturation band.
+
+        Scenario: 20 baseline samples at 0.08, 5 peak samples at 0.85,
+        10 post-dip samples at 0.57 (the agent's query lands in the dip
+        tail). ``current == 0.57`` but ``peak == 0.85`` — must fire.
+        """
+        from src.agent.tools.query_metrics import query_metrics
+
+        values = [0.08] * 20 + [0.85] * 5 + [0.57] * 10
+        mock_instance = mock_cls.return_value
+        mock_instance.range_query.return_value = self._mock_range_response(values)
+        result = query_metrics.invoke(
+            {
+                "service_name": "checkoutservice",
+                "metric_name": "memory_utilization",
+                "time_range_minutes": 10,
+            }
+        )
+        assert result["anomalous"] is True
+        assert "CRITICAL" in result["note"]
+        assert "SATURATED" in result["note"]
+        assert result["stats"]["peak"] >= 0.80
+        # current reflects the tail scrape — well under threshold on its own.
+        assert result["stats"]["current"] < 0.80
+
+    @patch("src.agent.tools.query_metrics.MetricsCollector")
+    def test_memory_utilization_no_fire_insufficient_samples(self, mock_cls: MagicMock) -> None:
+        """With fewer than 4 samples, the memory_utilization detector refuses
+        to fire — avoids false positives from a single-point scrape glitch.
+
+        The window is narrowed to 1 minute so data coverage (3 of 4 expected
+        points = 75%) stays above the generic 70% sparse threshold, isolating
+        the ``len(values) >= 4`` guard we actually want to exercise.
+        """
+        from src.agent.tools.query_metrics import query_metrics
+
+        values = [0.08, 0.85, 0.90]
+        mock_instance = mock_cls.return_value
+        mock_instance.range_query.return_value = self._mock_range_response(values)
+        result = query_metrics.invoke(
+            {
+                "service_name": "checkoutservice",
+                "metric_name": "memory_utilization",
+                "time_range_minutes": 1,
+            }
+        )
+        # Memory-saturation-specific CRITICAL must not fire with <4 samples.
+        # Any other CRITICAL (sparse/stale) is a separate detector and is out
+        # of scope for this test.
+        assert "SATURATED" not in result.get("note", "")
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # TestSearchLogs
@@ -353,7 +493,7 @@ class TestBuildLogQL:
         from src.agent.tools.search_logs import _build_logql
 
         logql = _build_logql("OOM", "cartservice")
-        assert '|= `OOM`' in logql
+        assert "|= `OOM`" in logql
         assert 'service="cartservice"' in logql
 
     def test_or_alternation_uses_regex_filter(self) -> None:
@@ -383,7 +523,7 @@ class TestBuildLogQL:
 
         logql = _build_logql("connection refused", "cartservice")
         # backticks, not double-quotes, around the term
-        assert '`connection refused`' in logql
+        assert "`connection refused`" in logql
 
     def test_no_service_filter_uses_job_label(self) -> None:
         from src.agent.tools.search_logs import _build_logql
@@ -581,9 +721,7 @@ class TestSearchLogs:
         mock_resp.raise_for_status = MagicMock()
         mock_get.return_value = mock_resp
 
-        result = search_logs.invoke(
-            {"query": "fatal", "service_filter": "checkoutservice"}
-        )
+        result = search_logs.invoke({"query": "fatal", "service_filter": "checkoutservice"})
         assert "critical_service" not in result
         assert "CRITICAL" not in result.get("note", "")
         assert result.get("crash_match_count") == 1
@@ -595,9 +733,7 @@ class TestSearchLogs:
         from src.agent.tools.search_logs import search_logs
 
         mock_resp = MagicMock()
-        mock_resp.json.return_value = self._mock_crash_loki_response(
-            service="any", crash_count=10
-        )
+        mock_resp.json.return_value = self._mock_crash_loki_response(service="any", crash_count=10)
         mock_resp.raise_for_status = MagicMock()
         mock_get.return_value = mock_resp
 
