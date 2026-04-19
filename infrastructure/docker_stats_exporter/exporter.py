@@ -35,21 +35,38 @@ def _extract_cpu_seconds(stats: dict[str, Any]) -> float | None:
     return total_ns / 1e9
 
 
-def _extract_memory(stats: dict[str, Any]) -> tuple[float | None, float | None]:
-    """Extract memory usage and working set bytes.
+def _extract_memory(
+    stats: dict[str, Any],
+) -> tuple[float | None, float | None, float | None]:
+    """Extract memory usage, working set, and cgroup limit bytes.
 
-    Returns (usage_bytes, working_set_bytes).
-    working_set = usage - inactive_file (cache that can be reclaimed).
+    Returns (usage_bytes, working_set_bytes, limit_bytes).
+
+    - ``working_set = usage - inactive_file`` matches the Kubernetes
+      definition (RSS excluding reclaimable page cache).
+    - ``limit`` is the cgroup memory limit applied to the container. On
+      macOS Docker Desktop a container with no ``--memory`` flag reports
+      ``limit == host RAM`` (~16 GB); the agent-side ratio detector
+      ignores those. When the Docker API omits ``limit`` entirely, the
+      third tuple element is ``None`` and the exporter skips emitting
+      the ``container_spec_memory_limit_bytes`` gauge for that container.
+    - NOTE: this is the ``--memory`` cgroup limit, not ``--memory-swap``.
+      Fault scripts that want to trigger memory pressure must set both
+      flags to the same value so swap cannot mask the cap.
     """
     mem = stats.get("memory_stats", {})
     usage = mem.get("usage")
     if usage is None:
-        return None, None
+        return None, None, None
 
     # working_set = usage - inactive_file (matches Kubernetes definition)
     cache = mem.get("stats", {}).get("inactive_file", 0)
     working_set = max(0, usage - cache)
-    return float(usage), float(working_set)
+
+    limit_raw = mem.get("limit")
+    limit = float(limit_raw) if limit_raw is not None else None
+
+    return float(usage), float(working_set), limit
 
 
 def _extract_network(stats: dict[str, Any]) -> dict[str, float]:
@@ -94,11 +111,24 @@ def _build_metrics(client: docker.DockerClient) -> str:
 
     # Header comments (TYPE/HELP)
     headers = [
-        ("container_cpu_usage_seconds_total", "counter", "Cumulative CPU time consumed in seconds."),
+        (
+            "container_cpu_usage_seconds_total",
+            "counter",
+            "Cumulative CPU time consumed in seconds.",
+        ),
         ("container_memory_usage_bytes", "gauge", "Current memory usage in bytes."),
         ("container_memory_working_set_bytes", "gauge", "Current working set in bytes."),
+        (
+            "container_spec_memory_limit_bytes",
+            "gauge",
+            "Memory cgroup limit in bytes (host RAM when no --memory flag is set).",
+        ),
         ("container_network_receive_bytes_total", "counter", "Cumulative network bytes received."),
-        ("container_network_transmit_bytes_total", "counter", "Cumulative network bytes transmitted."),
+        (
+            "container_network_transmit_bytes_total",
+            "counter",
+            "Cumulative network bytes transmitted.",
+        ),
         ("container_network_receive_errors_total", "counter", "Cumulative receive errors."),
         ("container_network_transmit_errors_total", "counter", "Cumulative transmit errors."),
         ("container_fs_usage_bytes", "counter", "Total filesystem I/O bytes."),
@@ -135,18 +165,29 @@ def _build_metrics(client: docker.DockerClient) -> str:
             lines.append(f"container_cpu_usage_seconds_total{{{label_str}}} {cpu_sec:.6f}")
 
         # Memory
-        mem_usage, mem_working = _extract_memory(stats)
+        mem_usage, mem_working, mem_limit = _extract_memory(stats)
         if mem_usage is not None:
             lines.append(f"container_memory_usage_bytes{{{label_str}}} {mem_usage:.0f}")
         if mem_working is not None:
             lines.append(f"container_memory_working_set_bytes{{{label_str}}} {mem_working:.0f}")
+        # container_spec_memory_limit_bytes — the cgroup memory limit. Labelled
+        # identically to container_memory_working_set_bytes so the agent-side
+        # memory_utilization ratio query joins natively on {service,name}.
+        # Containers that don't report a limit (unlikely in practice) are
+        # simply absent from this gauge.
+        if mem_limit is not None:
+            lines.append(f"container_spec_memory_limit_bytes{{{label_str}}} {mem_limit:.0f}")
 
         # Network
         net = _extract_network(stats)
         lines.append(f"container_network_receive_bytes_total{{{label_str}}} {net['rx_bytes']:.0f}")
         lines.append(f"container_network_transmit_bytes_total{{{label_str}}} {net['tx_bytes']:.0f}")
-        lines.append(f"container_network_receive_errors_total{{{label_str}}} {net['rx_errors']:.0f}")
-        lines.append(f"container_network_transmit_errors_total{{{label_str}}} {net['tx_errors']:.0f}")
+        lines.append(
+            f"container_network_receive_errors_total{{{label_str}}} {net['rx_errors']:.0f}"
+        )
+        lines.append(
+            f"container_network_transmit_errors_total{{{label_str}}} {net['tx_errors']:.0f}"
+        )
 
         # Filesystem
         fs_usage = _extract_fs_usage(stats)
