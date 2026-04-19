@@ -419,6 +419,8 @@ def discover_causation(
 |---|---|---|---|---|
 | `cpu_usage` | CPU utilization rate | ratio | Docker Stats Exporter | `rate(container_cpu_usage_seconds_total{service="X"}[1m])` |
 | `memory_usage` | Memory working set | bytes | Docker Stats Exporter | `container_memory_working_set_bytes{service="X"}` |
+| `memory_limit` | cgroup memory limit (Session 13) | bytes | Docker Stats Exporter | `container_spec_memory_limit_bytes{service="X"}` |
+| `memory_utilization` | Working set / cgroup limit (Session 13) | ratio [0,1] | Docker Stats Exporter (derived) | `container_memory_working_set_bytes{service="X"} / container_spec_memory_limit_bytes{service="X"}` |
 | `network_rx_bytes_rate` | Network receive rate | bytes/s | Docker Stats Exporter | `rate(container_network_receive_bytes_total[1m])` |
 | `network_tx_bytes_rate` | Network transmit rate | bytes/s | Docker Stats Exporter | `rate(container_network_transmit_bytes_total[1m])` |
 | `network_rx_errors_rate` | Network receive errors | errors/s | Docker Stats Exporter | `rate(container_network_receive_errors_total[1m])` |
@@ -430,6 +432,10 @@ def discover_causation(
 | `probe_latency` | TCP/HTTP response time | seconds | Service Probe Exporter | `service_probe_duration_seconds{service="X"}` |
 
 > **Availability caveats:** Container-level metrics available for all 7 services. Application-level metrics (request_rate, error_rate, latency_p99) only for trace-exporting services: frontend, checkoutservice, productcatalogservice, paymentservice, loadgenerator. cartservice (.NET), currencyservice (C++), and redis do NOT export traces in OTel Demo v1.10.0. Probe metrics available for all 7 services via direct TCP/HTTP probing.
+
+> **`memory_utilization` CRITICAL detector (Session 13):** `query_metrics.py` fires CRITICAL for `memory_utilization` when `peak >= 0.80 AND baseline_mean <= 0.50 AND len(values) >= 4`. Peak-based (not `values[-1]`-based) to survive GC dips at the tail of the window — Go/JVM runtimes cycle the working set between cap and reclaim bands, so the instantaneous last scrape can land below the threshold even when the fault obviously saturated mid-window. Emitted `stats` include `peak` alongside `current`, `baseline_mean`, etc. `memory_utilization` is deliberately NOT added to `_CAUSAL_METRICS` in `discover_causation.py` — derived ratios degrade Fisher's Z test via near-collinearity with their numerator/denominator columns.
+
+> **Uncapped containers:** On macOS Docker Desktop, a container without an explicit `--memory` flag reports `container_spec_memory_limit_bytes == host RAM` (~16 GB), so `memory_utilization` stays < 1% consistently. This is the intended signal shape — NOT a fault. The CRITICAL detector's `baseline_mean <= 0.50` guard also prevents flagging always-hot services.
 
 ---
 

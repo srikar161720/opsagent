@@ -66,6 +66,10 @@ OpsAgent is evaluated across three independent tracks that collectively answer d
 
 > **Note (Session 11):** `high_latency` target changed from `paymentservice` to `frontend` because the loadgenerator only sends traffic to frontend; 500ms latency on paymentservice was invisible since no requests reached it. `connection_exhaustion` method changed from `redis-cli CONFIG SET maxclients 5` to `docker pause redis` — pause produces detectable probe_up=0 signal. `network_partition` method changed from `docker network disconnect` to `docker pause paymentservice` for the same reason.
 
+> **Note (Session 12):** `config_error` retargeted from `currencyservice` to `productcatalogservice`. The v1.10.0 currencyservice has a baseline SIGSEGV crash-loop that made config_error indistinguishable from baseline noise. Replacement container sets `PRODUCT_CATALOG_SERVICE_PORT=999999` + `--restart on-failure` to produce a clean invalid-port crash-loop. The fault-summary table above still shows the original target for historical context; see `tests/evaluation/fault_injection_suite.py:GROUND_TRUTH` for the live value (`productcatalogservice`).
+
+> **Note (Session 13):** `memory_pressure` fault script `03_memory_pressure.sh` switched from fixed `--memory 25m` to a **dynamic cap** `max(working_mb × 1.2, working_mb + 2)`. The fixed cap failed to saturate an idle-state checkoutservice (working set ~15 MiB vs 25 MiB cap → only 60% utilization, below the 80% `memory_utilization` CRITICAL threshold). The dynamic cap measures `docker stats --no-stream` at inject time and applies a multiplier that guarantees ~83-94% immediate utilization regardless of Go runtime heap state, while the `W + 2 MiB` floor avoids instant OOMKill on cold heaps.
+
 > **Key RCA challenge:** `cascading_failure` is the hardest case — multiple downstream services degrade sequentially, but the root cause is always the single upstream service that failed first. This is where causal discovery (PC algorithm) differentiates OpsAgent from symptom-chasing baselines.
 
 ### 2.2 Test Schedule

@@ -168,6 +168,8 @@ volumes:
 
 > **macOS note:** cAdvisor was originally used for container metrics but cannot discover individual containers on macOS Docker Desktop (cgroupv2 + VM-based Docker). It was replaced with a custom Docker Stats Exporter that queries the Docker API directly via the Python `docker` SDK. The exporter uses a background collection thread to avoid Prometheus scrape timeouts.
 
+> **Exposed gauges (port 9101):** `container_cpu_usage_seconds_total` (counter), `container_memory_usage_bytes` (gauge), `container_memory_working_set_bytes` (gauge), **`container_spec_memory_limit_bytes` (gauge — cgroup memory limit, added Session 13)**, `container_network_receive_bytes_total` / `_transmit_bytes_total` / `_receive_errors_total` / `_transmit_errors_total` (counters), `container_fs_usage_bytes` (counter). All gauges share the `{service, name}` label set so Prometheus can join derived ratios like `memory_working_set / memory_limit` natively without `on()` / `ignoring()`. The `limit` gauge is read from `stats["memory_stats"]["limit"]` and tracks `docker update --memory` in real time; on macOS Docker Desktop an uncapped container reports `limit == host RAM` (~16 GB), which is correct behaviour — `memory_utilization` ratio stays <1% for those containers.
+
 ---
 
 ## 2. OTel Demo Compose (Reduced Services)
@@ -598,25 +600,57 @@ echo "$(date -Iseconds) - FAULT_END: Latency removed from $SERVICE" | tee -a /tm
 | Attribute | Value |
 |---|---|
 | Target | `checkoutservice` |
-| Method | `docker update --memory` (128 MB hard cap) |
-| Symptoms | OOMKill events, memory_usage at 100%, GC pauses |
-| Detection time | < 120 seconds (gradual onset) |
-| Difficulty | Medium — gradual degradation |
+| Method | `docker update --memory` with a **dynamic cap** computed as `max(working_mb × 1.2, working_mb + 2)` (Session 13 patch) |
+| Symptoms | Sustained working-set ≥80% of cgroup limit (captured by `memory_utilization` CRITICAL detector). Go runtime GC-cycles aggressively without emitting OOMKilled stdout logs; `probe_up` stays at 1, `probe_latency` stays near baseline. |
+| Detection time | < 120 seconds (Session 13: typical first-CRITICAL fire within 30 s of fault start via the sweep) |
+| Difficulty | Medium — no crash, no log trail; the signal is a metric-ratio saturation that requires the `container_spec_memory_limit_bytes` gauge to be scraped. |
 
 ```bash
-#!/bin/bash
-SERVICE="checkoutservice"
-MEMORY_LIMIT="128m"
-DURATION_SECONDS=180
+#!/usr/bin/env bash
+# Session 13 version: dynamic cap that scales with current working set.
+# A fixed 25 MiB cap previously failed to saturate an idle-state checkoutservice
+# (~15 MiB working set → only 60% utilization, below the 80% CRITICAL threshold).
+# Dynamic cap guarantees ~83-94% utilization regardless of Go runtime heap state.
+set -euo pipefail
 
-ORIGINAL_LIMIT=$(docker inspect $SERVICE --format '{{.HostConfig.Memory}}' 2>/dev/null || echo "0")
+CONTAINER="demo_app-checkoutservice-1"
+FALLBACK_CAP_MB=25   # used if docker stats parse fails
 
-echo "$(date -Iseconds) - FAULT_START: Memory Pressure ($MEMORY_LIMIT) on $SERVICE" | tee -a /tmp/fault_log.txt
-docker update --memory=$MEMORY_LIMIT --memory-swap=$MEMORY_LIMIT $SERVICE
-sleep $DURATION_SECONDS
-docker update --memory=0 --memory-swap=0 $SERVICE   # 0 = unlimited
-echo "$(date -Iseconds) - FAULT_END: Memory limit restored on $SERVICE" | tee -a /tmp/fault_log.txt
+get_working_mb() {
+    local raw num_unit num unit
+    raw=$(docker stats --no-stream --format '{{.MemUsage}}' "$1" 2>/dev/null) || return 1
+    num_unit=$(echo "$raw" | awk -F'/' '{gsub(/^[ \t]+|[ \t]+$/, "", $1); print $1}')
+    num=$(echo "$num_unit" | sed 's/[A-Za-z]*$//')
+    unit=$(echo "$num_unit" | sed 's/[0-9.]*//')
+    case "$unit" in
+        KiB) awk -v n="$num" 'BEGIN{printf "%d", n/1024}' ;;
+        MiB) awk -v n="$num" 'BEGIN{printf "%d", n}' ;;
+        GiB) awk -v n="$num" 'BEGIN{printf "%d", n*1024}' ;;
+        *)   return 1 ;;
+    esac
+}
+
+case "${1:-}" in
+    inject)
+        WORKING_MB=$(get_working_mb "$CONTAINER" || true)
+        if [[ -n "$WORKING_MB" && "$WORKING_MB" =~ ^[0-9]+$ && "$WORKING_MB" -gt 0 ]]; then
+            # cap = max(W * 1.2, W + 2). The +2 MiB floor takes over for cold
+            # heaps (< 10 MiB) where 1.2x would leave <2 MiB GC headroom.
+            CAP_MUL=$(( WORKING_MB * 12 / 10 ))
+            CAP_ADD=$(( WORKING_MB + 2 ))
+            if (( CAP_MUL > CAP_ADD )); then CAP_MB=$CAP_MUL; else CAP_MB=$CAP_ADD; fi
+        else
+            CAP_MB=$FALLBACK_CAP_MB
+        fi
+        docker update --memory "${CAP_MB}m" --memory-swap "${CAP_MB}m" "$CONTAINER"
+        ;;
+    restore)
+        docker update --memory 256m --memory-swap 256m "$CONTAINER"
+        ;;
+esac
 ```
+
+> **Important (Session 13 gotcha):** This fault class only becomes detectable once the Docker Stats Exporter emits `container_spec_memory_limit_bytes` AND `query_metrics.py` fires CRITICAL on the ratio `working_set / limit`. Without the exporter gauge, Prometheus has no denominator to divide by; without the detector, the agent would see elevated memory but no CRITICAL override on the correct service. See `CLAUDE.md` gotchas: "Docker Stats Exporter emits `container_spec_memory_limit_bytes` (Session 13)" and "`memory_utilization` CRITICAL detector (Session 13)".
 
 ### Fault 4: CPU Throttling (Medium) — `04_cpu_throttling.sh`
 

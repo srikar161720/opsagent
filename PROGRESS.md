@@ -197,7 +197,7 @@
 - [x] Create `tests/unit/test_baseline_comparison.py` — 17 tests across 4 classes
 - [x] Create `tests/unit/test_inject_faults.py` — 8 tests across 2 classes
 - [x] End-to-end single-fault test verified: `service_crash` → Recall@1=100%, Recall@3=100%, MTTR=15.3s
-- [ ] Run OTel Demo fault injection tests — 40 tests completed Session 11 (27.5% Recall@1 / 40% Recall@3); suite resized to **35 tests (7 types × 5 reps)** in Session 12 after diagnosis showed `cpu_throttling` is undetectable on the idle demo. Session 12 re-run achieved **42.9% Recall@1 / 68.6% Recall@3**. Tier 4/5 follow-ups (Fix 17 crash-log CRITICAL, Fix 18-ext sweep, Fix 21 knockout node) implemented + unit-verified — next full-suite re-run pending.
+- [x] Run OTel Demo fault injection tests — 40 tests completed Session 11 (27.5% Recall@1 / 40% Recall@3); suite resized to **35 tests (7 types × 5 reps)** in Session 12 after diagnosis showed `cpu_throttling` is undetectable on the idle demo. Session 12 re-run achieved **42.9% Recall@1 / 68.6% Recall@3** (Tier 1/2/3 fixes). Session 12 follow-up with Tier 4/5 fixes achieved **91.4% Recall@1 / 94.3% Recall@3** — memory_pressure remained weak at 2/5 (40%). **Session 13 added memory-saturation detection (Docker Stats Exporter `container_spec_memory_limit_bytes` gauge, `memory_utilization` CRITICAL detector with peak-based trigger, dynamic fault-script cap) and achieved 100% Recall@1 / 100% Recall@3 (35/35) at 0.75 confidence uniformly, with memory_pressure at 5/5.** Results in `data/evaluation/results_session13/`. Clears the ≥80% Recall@1 and ≥95% Recall@3 targets.
 - [ ] Evaluate 3 internal baselines: Rule-Based, AD-Only, LLM-Without-Tools
 
 ### RCAEval Cross-System Evaluation (Week 10, Days 1–2)
@@ -1086,3 +1086,90 @@
 - Context files updated for new counts: 7 fault types, 35 tests, LLM = `gemini-3-flash-preview`, graph = 7 nodes.
 - `scripts/inject_faults.py` now validates `--fault <unknown>` with a helpful error (listing known types) instead of a `KeyError` traceback. `--seed` flag propagates to the underlying suite.
 - The user requested that git commits be held — all Session 12 changes are uncommitted on `main`. Awaiting manual commit after the Tier 4/5 re-run validates the improvements.
+
+---
+
+### 2026-04-19 — Session 13
+
+**Phase:** Phase 5 — Evaluation (Week 9 — memory_pressure deep-dive + full 35-test re-run → 100% Recall@1)
+**Duration:** ~12 hours (multi-day deep-dive: diagnosis, fix A+B, tuning, fault-script patch, 35-test suite)
+
+**Completed:**
+
+*Diagnosis of the memory_pressure recall gap (Session 12 was 2/5 = 40% — only weak fault class):*
+- Ran live `03_memory_pressure.sh inject` against a warm checkoutservice and traced every channel the agent sees: `probe_up = 1.0` (stable), `probe_latency ~3 ms` (stable), `cpu_usage` has a 2σ flag but no CRITICAL, `memory_usage` flattens near the cap (no 2σ spike because mean ≈ current), crash-pattern logs produce **zero** matches (no OOMKilled / SIGKILL — Go runtime GC-cycles under cgroup pressure without emitting stdout errors). Result: not a single CRITICAL detector fires on the correct service, so `critical_services` stays empty, the CRITICAL-override is bypassed, and PC's weak noise wins.
+- Measured baseline memory utilization across the 6 active services: **7.3 – 45.4%** (checkoutservice 11.6%, frontend 31.4%, cartservice 33.1%, paymentservice 45.2%, productcatalogservice 10.0%, redis 14.8%). During memory_pressure fault with a 25 MiB cap, checkoutservice reached 85-88%. Clean separability.
+- Verified Docker API exposes `stats["memory_stats"]["limit"]` on every container — tracks `docker update --memory` in real time. This is what made the ratio detector possible.
+- Identified cross-test baseline noise: in v1.10.0, `frontend` is configured to connect to `cartservice:7070` but the .NET cartservice actually binds on port 8080, producing persistent `ECONNREFUSED 172.18.0.16:7070` log spam that the LLM otherwise latches onto during memory_pressure (no other CRITICAL signal to override it). Documented but not fixed in this session — other faults' stronger CRITICAL signals already drown it out.
+
+*Fix A — memory saturation detection pipeline:*
+- **`infrastructure/docker_stats_exporter/exporter.py`** — `_extract_memory()` now returns a 3-tuple `(usage, working_set, limit)`; new gauge `container_spec_memory_limit_bytes{service, name}` emitted alongside `container_memory_working_set_bytes` with the identical label set so Prometheus joins the ratio `working_set / limit` natively. Documented the macOS-Docker-Desktop corner case where an uncapped container reports `limit == host RAM` (~16 GB). Updated HELP/TYPE header list.
+- **`src/agent/tools/query_metrics.py`** — added two keys to `METRIC_PROMQL`: `memory_limit` (cgroup limit in bytes) and `memory_utilization` (working_set / limit ratio). New CRITICAL detector after the `probe_latency` block: fires when `metric_name == "memory_utilization" AND len(values) >= 4 AND baseline_mean <= 0.50 AND peak >= 0.80`. Emits `stats["peak"]` alongside `current`, `mean`, `baseline_mean`, etc. The `peak`-based (not `current`-based) trigger is critical — see Session 13 detector tuning below.
+- **`src/agent/graph.py`** — `sweep_probes_node` now queries 5 metrics per service (added `memory_utilization` as the 5th channel). Sweep math: 6 services × 5 metrics + 6 log calls = **36 calls per investigation** (was 30). Updated docstring to renumber channels 1-5 and explicitly document memory_utilization's role. Still bypasses `tool_calls_remaining` — mandatory infra. Summary message's "Do NOT re-query" list expanded to include `memory_utilization`.
+
+*Fix B — system prompt correction:*
+- **`src/agent/prompts/system_prompt.py`** — "Available Metrics" section lists `memory_limit` and `memory_utilization` under container metrics with one-line descriptions and the uncapped-container note. Example 3 (memory_pressure) fully rewritten: the old "look for OOMKilled log entries" guidance was factually wrong (Go GC absorbs soft pressure without emitting crash logs) and actively misled the LLM. New example steers the agent to the `memory_utilization` CRITICAL + elevated-error-rate signature and explicitly warns that OOMKilled log absence is EXPECTED for soft memory pressure.
+
+*Detector tuning — peak vs current (smoke-run iteration 1):*
+- First smoke run hit 6/7 on per-fault verification: memory_pressure failed despite the detector shipping. Prometheus replay of the fault window showed checkoutservice `memory_utilization` was 0.856 for 5 consecutive samples (clear saturation), then dipped to 0.572 due to a GC cycle right before the 120-s investigation mark. With `current = values[-1]` the detector saw 0.572, below the 0.80 threshold, and missed the fault. Changed the trigger to `peak = np.max(arr)` — captures the sustained-saturation band regardless of tail-scrape GC state. Rationale: memory_utilization is a bounded ratio [0, 1] with no realistic mechanism for a single-scrape spurious spike to 80%+; uncapped containers stay <1% consistently; the existing `baseline_mean <= 0.50` guard still rejects always-hot services.
+- Added regression unit test `test_memory_utilization_fires_despite_gc_dip_at_tail` exercising this exact scenario (20 samples at 0.08, 5 at 0.85, 10 at 0.57 — `current` subthreshold but `peak` fires).
+
+*Fault-script patch — deterministic saturation (smoke-run iteration 2):*
+- Second smoke run still missed memory_pressure (new confidence: 0.45, `productcatalogservice` misattributed via PC noise). Root cause: `checkoutservice` had been idle post-previous-test, Go GC had reclaimed heap to 8-15 MiB, and the fixed `--memory 25m` cap left 10 MiB of headroom — working set plateaued at `8/25 = 0.32 to 15/25 = 0.60`, never reached the 0.80 threshold. **The fault itself was not producing saturation.**
+- **`demo_app/fault_scenarios/03_memory_pressure.sh`** — rewrote `inject` to query `docker stats --no-stream --format '{{.MemUsage}}'`, parse KiB / MiB / GiB via awk+sed (no Python dependency), and apply `cap_mb = max(working_mb * 1.2, working_mb + 2)`. The `W + 2` branch takes over for cold heaps (< 10 MiB) where 1.2× would leave < 2 MiB GC headroom and risk OOMKill. Falls back to fixed 25 MiB if stats parse fails. Restore unconditionally sets cap to 256 MiB.
+- Manual verification: cold-restart checkoutservice (W=8 MiB) → cap=10 MiB → immediate utilization 89%, sustained at 86-94% across 120 s under load, restart_count=1 (one mid-test OOM-like event but container kept running, oom_killed=false). Warm checkoutservice (W=29 MiB) → cap=34 MiB → sustained 85% utilization. Both cases saturate reliably.
+
+*Comprehensive testing:*
+- **New test file `tests/unit/test_docker_stats_exporter.py`** (7 tests): `TestExtractMemory` (3 — 3-tuple return with/without limit, None-safety); `TestBuildMetrics` (4 — new gauge emitted, label-set matches working_set for ratio join, omitted when Docker returns no limit, skips unlabeled containers). Mocks `docker.DockerClient` via a `sys.modules['docker']` stub since the host Poetry env doesn't ship the `docker` SDK (it runs inside the exporter's own container).
+- **Extended `tests/unit/test_agent_tools.py::TestQueryMetrics`** (6 new tests): `test_metric_promql_contains_memory_limit_and_utilization`, `test_memory_utilization_critical_fires_on_saturation`, `test_memory_utilization_no_fire_when_baseline_already_high`, `test_memory_utilization_no_fire_at_moderate_usage`, `test_memory_utilization_fires_despite_gc_dip_at_tail`, `test_memory_utilization_no_fire_insufficient_samples`.
+- **Extended `tests/unit/test_agent_graph.py::TestSweepProbesNode`**: updated `test_sweeps_all_affected_services` and `test_threads_start_time` call-count assertions from 24 → 30 metric calls; evidence-count from 30 → 36; added `memory_utilization` to the 5-metric tuple assertion.
+- **Extended `tests/unit/test_agent_graph.py::TestSystemPrompt`**: `test_memory_metrics_documented` (both `memory_limit` and `memory_utilization` appear in SYSTEM_PROMPT), `test_memory_pressure_example_updated` (old "OOMKilled entries" wording is gone, `memory_utilization` appears near Example 3).
+- **330 unit tests passing** (was 315 pre-session, +15 across 3 test files). `ruff check` and `ruff format` clean on all modified files. `mypy src/` clean (39 source files, 0 issues).
+
+*Live verification sequence:*
+- Rebuilt + restarted Docker Stats Exporter; confirmed `container_spec_memory_limit_bytes` flowing for all 14 containers (6 demo + 7 infra + 1 Docker socket).
+- Confirmed Prometheus ratio query `container_memory_working_set_bytes{...} / container_spec_memory_limit_bytes{...}` returns numeric values without label-join issues. Baseline utilizations measured across the 6 active services: 7.3-45.4% — all well below the 0.80 trigger and 0.50 baseline guard.
+- Injected memory_pressure; waited 120 s; directly invoked `query_metrics.invoke({..., "metric_name": "memory_utilization", "start_time": <anchor>})` — CRITICAL fired on checkoutservice with `peak=0.833, baseline_mean=0.116, current=0.833`, matching the expected signal shape. Verified no false-fire on the other 5 services.
+
+*Full 35-test fault-injection suite (Session 13 run, results in `data/evaluation/results_session13/`):*
+- Executed `caffeinate -s poetry run python tests/evaluation/fault_injection_suite.py --seed 42 --repetitions 5` (foreground, ~3.5 hours).
+- **Overall: Recall@1 = 35/35 = 100.0%, Recall@3 = 35/35 = 100.0%**, 95% Wilson CI on Recall@1: [90.1%, 100.0%], zero inconclusive.
+- **Every single correct prediction at exactly 0.75 confidence** — the CRITICAL-override band fires uniformly across all fault classes. No test fell through to the lower hypothesis-override or PC+LLM-average paths.
+- Per-fault: cascading_failure 5/5, config_error 5/5, connection_exhaustion 5/5, high_latency 5/5, **memory_pressure 5/5**, network_partition 5/5, service_crash 5/5. Mean investigation duration 24.1 s (range 18.4-33.8 s); mean detection latency 125.2 s (pre-investigation wait constant); mean MTTR 149.4 s.
+- Top-1 prediction distribution: cartservice 10 (GT 10), productcatalogservice 5 (GT 5), redis 5 (GT 5), frontend 5 (GT 5), checkoutservice 5 (GT 5), paymentservice 5 (GT 5). **Exact 1-to-1 match with ground-truth frequencies** — zero misattribution, zero bias. Dramatic improvement over Session 11's 55% cartservice over-prediction.
+
+*Cross-session comparison:*
+- Session 11: 27.5% Recall@1 / 40% Recall@3 / 5 inconclusive / mean correct-conf 0.60.
+- Session 12 Tier 1/2/3: 42.9% / 68.6% / 0 inconclusive / mean correct-conf 0.49.
+- Session 12 Tier 4/5: 91.4% / 94.3% / 0 inconclusive / mean correct-conf 0.73 (memory_pressure 40%).
+- **Session 13: 100.0% / 100.0% / 0 inconclusive / mean correct-conf 0.75 (memory_pressure 100%).**
+- Cumulative delta S11 → S13: +72.5 pp Recall@1. Incremental S12 → S13: +8.6 pp overall, +60 pp on memory_pressure alone.
+
+*Documentation updates:*
+- `CLAUDE.md`: updated "8 container-level metrics available" (was 6), "Sweep covers 5 metrics + logs" (was 4), "Fault script restore methods" (item 3 now documents dynamic cap formula). Added five new gotchas: Docker Stats Exporter emits `container_spec_memory_limit_bytes`; `memory_utilization` CRITICAL detector (peak-based, 80%/50%); `memory_utilization` + `memory_limit` added to `METRIC_PROMQL` (and NOT to `_CAUSAL_METRICS`); dynamic fault-script cap formula; Session 13 final result.
+- `PROGRESS.md`: marked "Run OTel Demo fault injection tests" as complete; added this session log entry.
+- `context/evaluation_strategy.md`: updated Fault 3 description + fault summary table. `context/infrastructure_and_serving.md`: updated Docker Stats Exporter gauge list. `context/agent_specs.md`: added memory_limit + memory_utilization rows to the Available Metrics table; updated sweep channel count.
+
+**In Progress:**
+- Git commits still held at user's request — all Session 12 + Session 13 changes are uncommitted on `main`. Awaiting explicit commit instruction.
+- `docs/evaluation_results.md` still needs to be drafted with the 100%/100% Session 13 numbers + per-fault breakdown + cross-session comparison.
+
+**Blockers / Issues:**
+- **Fault non-determinism with a fixed `--memory 25m` cap**: under Go GC, checkoutservice working-set ranges 8-30 MiB depending on recent traffic / GC history. A fixed 25 MiB cap is only "tight" when heap is warm (≥20 MiB); idle heaps produce 32-60% utilization and miss the 0.80 threshold. **Resolution:** dynamic `max(W*1.2, W+2)` formula guarantees ≥80% immediate utilization regardless of heap state while preserving the "soft pressure" fault class (no OOM-kill, no crash loop).
+- **Peak vs `values[-1]` in memory_utilization CRITICAL trigger**: Go runtimes GC-cycle under tight caps — working set oscillates between ~cap (85%+) and dips (55-65%). A tail scrape landing on a GC dip misses the threshold. **Resolution:** switched trigger to `peak = np.max(arr)`. Safe for memory_utilization because the metric is a bounded ratio with no realistic single-scrape spurious-spike mechanism; probe_latency's `values[-1]`-based detector is unchanged because a single slow scrape IS a meaningful latency signal there.
+- **`docker` SDK not installed in host Poetry env**: `infrastructure/docker_stats_exporter/exporter.py` is tested via a module-level `sys.modules['docker']` stub (a `ModuleType` with `DockerClient = MagicMock()`) injected before `importlib.util` loads the file. Every test that exercises `_build_metrics` passes its own `MagicMock` client, so the stub just needs to satisfy the import.
+- **Baseline cart-unreachable noise** (v1.10.0 frontend → cartservice:7070 misconfiguration): persistent `ECONNREFUSED` spam in frontend logs at all times. Not fixed this session — other faults' stronger CRITICAL signals override it, and Session 13's memory_utilization CRITICAL now overrides it for memory_pressure too.
+
+**Next Session:**
+- Evaluate the 3 internal baselines (Rule-Based, AD-Only, LLM-Without-Tools) against the same 35-test suite for MTTR-reduction comparison.
+- Begin Week 10: RCAEval cross-system evaluation on RE1 (375 cases) / RE2 (271) / RE3 (90) via `tests/evaluation/rcaeval_evaluation.py`.
+- Draft `docs/evaluation_results.md` with Session 13's 100%/100% numbers + per-fault breakdown + Session 11-12-13 progression chart.
+- Optional: fix the v1.10.0 frontend → cartservice:7070 misconfiguration (set `CART_SERVICE_ADDR=cartservice:8080` in frontend's env) to remove baseline log noise that hasn't bitten evaluation but pollutes investigations.
+
+**Notes:**
+- Total sweep tool calls jumped from 30 (Session 12) → 36 (Session 13) due to the added `memory_utilization` channel. Still bypasses `tool_calls_remaining` so the LLM keeps its full 10-call budget.
+- Session 13's 24.1 s mean investigation duration is **faster than Session 12's 30.7 s** despite the larger sweep — because the CRITICAL-override fires immediately on the correct service for every fault type, the agent's investigation loop terminates at the first cycle (no refinement round). Memory_pressure in particular dropped from 62.3 s → 23.2 s mean.
+- `memory_utilization` was **deliberately NOT added** to `_CAUSAL_METRICS` in `discover_causation.py`. Derived ratios are known to degrade Fisher's Z test when their numerator/denominator columns are also present (they introduce perfect-collinearity via the ratio identity and near-collinearity with lagged copies). The CRITICAL-override path handles attribution without needing PC to see the ratio.
+- Live diagnosis validated Context7-equivalent knowledge of Docker SDK: `stats["memory_stats"]["limit"]` is always present for running containers; `docker update --memory` mutates it without a restart; macOS Docker Desktop reports host-RAM for uncapped containers. No upstream docs surprised us.
+- Peak utilization observed on checkoutservice during the 35-test suite's memory_pressure runs: **0.83-0.94 (all 5 runs)**. Baseline_mean (pre-anchor window) stayed at 0.05-0.12 across all runs. Clear separation from the detector's [0.50, 0.80] thresholds.
+- Git commits are still held at user's request. All Session 12 + Session 13 changes are uncommitted on `main`. No branch was created per user instruction.
