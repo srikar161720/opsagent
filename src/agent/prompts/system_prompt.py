@@ -95,8 +95,19 @@ is alive but responding slowly — likely experiencing CPU throttling, memory pr
 or network latency injection.
 
 Container-level metrics (available for ALL services):
-  cpu_usage, memory_usage, network_rx_bytes_rate, network_tx_bytes_rate, \
+  cpu_usage, memory_usage, memory_limit, memory_utilization, \
+network_rx_bytes_rate, network_tx_bytes_rate, \
 network_rx_errors_rate, network_tx_errors_rate.
+
+- **memory_usage** is the container's current working-set bytes.
+- **memory_limit** is the cgroup memory limit in bytes.
+- **memory_utilization** is the ratio working_set/limit (0.0-1.0). It is \
+the sharpest signal for soft memory pressure: Go/JVM runtimes adapt to a \
+tight cgroup cap (no crash, no OOMKill log) but their working set clamps \
+near the limit. The query_metrics tool flags **CRITICAL** when \
+memory_utilization >= 0.80 AND the pre-fault baseline was <= 0.50. \
+Containers without an explicit `--memory` flag report memory_utilization \
+< 1% (limit == host RAM) — that is NOT a fault, just the absence of a cap.
 
 Application-level metrics (available for frontend, checkoutservice, \
 productcatalogservice, paymentservice — NOT cartservice, currencyservice, redis):
@@ -145,12 +156,19 @@ tool handles escaping internally. Always pass ``service_filter`` by name.
   Latency injection likely. Root cause: frontend.
 
 **Example 3: Memory pressure (memory_pressure)**
-- query_metrics(service_name=checkoutservice, metric_name=probe_up) → 1 (healthy)
-- query_metrics(service_name=checkoutservice, metric_name=memory_usage) \
-  → anomalous (2σ spike near cap)
-- search_logs(service_filter=checkoutservice, query=OOM OR killed OR memory) \
-  → OOMKilled entries
-- Reasoning: memory near limit + OOM log = memory exhaustion. Root cause: checkoutservice.
+- query_metrics(service_name=checkoutservice, metric_name=probe_up) → 1 (healthy, reachable)
+- query_metrics(service_name=checkoutservice, metric_name=probe_latency) \
+  → near baseline (service still responding promptly)
+- query_metrics(service_name=checkoutservice, metric_name=memory_utilization) \
+  → CRITICAL: ~85% of cgroup limit vs baseline ~12%
+- query_metrics(service_name=checkoutservice, metric_name=error_rate) \
+  → elevated (but NOT CRITICAL — Go/JVM runtimes degrade gracefully)
+- Reasoning: container-level memory saturation. OOMKilled / SIGKILL log \
+  lines may NOT appear for soft memory pressure — OOMKill is a kernel \
+  event reported by the Docker runtime, not emitted to the service's \
+  stdout, and garbage-collected runtimes often stabilise just under the \
+  cap without actually being killed. Trust the memory_utilization CRITICAL \
+  signal over log absence. Root cause: checkoutservice.
 
 **Example 4: CPU throttling (cpu_throttling)**
 - query_metrics(service_name=productcatalogservice, metric_name=probe_up) \

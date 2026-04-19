@@ -38,6 +38,17 @@ METRIC_PROMQL: dict[str, str] = {
     "network_tx_errors_rate": (
         'rate(container_network_transmit_errors_total{service="{service}"}[1m])'
     ),
+    # Memory saturation: raw cgroup limit + working-set/limit ratio.
+    # memory_utilization joins working_set with the limit exposed by the
+    # Docker Stats Exporter's container_spec_memory_limit_bytes gauge.
+    # Baseline values live in [0.07, 0.46] across the reduced OTel Demo
+    # services today; the CRITICAL detector in this module fires when
+    # current >= 0.80 AND baseline_mean <= 0.50.
+    "memory_limit": 'container_spec_memory_limit_bytes{service="{service}"}',
+    "memory_utilization": (
+        'container_memory_working_set_bytes{service="{service}"} '
+        '/ container_spec_memory_limit_bytes{service="{service}"}'
+    ),
     # Application-level metrics (OTel Collector spanmetrics)
     "request_rate": ('sum(rate(span_calls_total{service_name="{service}"}[1m]))'),
     "error_rate": (
@@ -74,8 +85,11 @@ def query_metrics(
             names exactly.
         metric_name: One of:
             Container metrics (all services): cpu_usage, memory_usage,
-            network_rx_bytes_rate, network_tx_bytes_rate,
-            network_rx_errors_rate, network_tx_errors_rate.
+            memory_limit (cgroup limit in bytes), memory_utilization
+            (ratio working_set/limit in [0.0, 1.0]; CRITICAL when >=0.80
+            with baseline <=0.50), network_rx_bytes_rate,
+            network_tx_bytes_rate, network_rx_errors_rate,
+            network_tx_errors_rate.
             Application metrics (frontend, checkoutservice,
             productcatalogservice, paymentservice): request_rate,
             error_rate, latency_p99.
@@ -208,9 +222,7 @@ def query_metrics(
             # The anchor is 60s after ``start`` (we extended the window 60s
             # backward earlier). Count how many timestamps fall before it.
             anchor_ts = start + timedelta(seconds=60)
-            baseline_end = sum(
-                1 for ts in timestamps if datetime.fromisoformat(ts) < anchor_ts
-            )
+            baseline_end = sum(1 for ts in timestamps if datetime.fromisoformat(ts) < anchor_ts)
         else:
             baseline_end = int(len(values) * 0.6)
 
@@ -229,11 +241,7 @@ def query_metrics(
         if metric_name == "probe_up" and len(values) >= 4:
             recent_down = sum(1 for v in values[-4:] if v == 0.0)
             was_healthy = baseline_mean >= 0.7
-            fresh_drop = (
-                baseline_mean >= 0.9
-                and values[-1] == 0.0
-                and values[-2] == 0.0
-            )
+            fresh_drop = baseline_mean >= 0.9 and values[-1] == 0.0 and values[-2] == 0.0
             if (recent_down >= 3 and was_healthy) or fresh_drop:
                 if fresh_drop and recent_down < 3:
                     reason = (
@@ -296,6 +304,65 @@ def query_metrics(
                     f"cause candidate."
                 ),
             }
+
+        # Memory saturation CRITICAL detector.
+        #
+        # The fault class this targets is soft memory pressure — e.g.
+        # `docker update --memory 25m` on a service whose baseline working
+        # set is ~30 MB. Under Go/JVM runtimes the GC reclaims aggressively
+        # and stabilises just under the new cap; nothing else fires CRITICAL
+        # (probe_up stays 1, probe_latency stays near baseline, no OOMKilled
+        # log lines appear because OOMKill is a kernel event, not a stdout
+        # line). The one clean, localisable signal is
+        # `working_set / limit >= 0.80` with a low baseline to prove the
+        # utilization *rose* into that band (not a service that legitimately
+        # runs near its cap).
+        #
+        # Guards:
+        #   - ``baseline_mean <= 0.50`` rejects services that live hot in
+        #     baseline — the fault bar is "roughly doubled into the high
+        #     band", not "always near cap".
+        #   - ``peak >= 0.80`` is well above the highest baseline observed
+        #     across the reduced OTel Demo (paymentservice at 0.46). We use
+        #     the peak across the window rather than ``current`` because Go
+        #     / JVM runtimes GC-cycle under a tight cap: working set spends
+        #     most of the window just below the limit but dips on each
+        #     collection, so ``values[-1]`` can land on a dip even when the
+        #     fault is clearly producing 5+ consecutive samples at cap. A
+        #     sustained-peak spike is the signal, not the instantaneous
+        #     last scrape. (Memory is a bounded ratio in [0, 1] and an
+        #     uncapped container reports <1% constantly, so a spurious
+        #     single-scrape spike to >=80% has no realistic source.)
+        #   - ``len(values) >= 4`` ensures at least 60 s of 15 s-step data
+        #     so a one-sample scrape glitch can't false-fire.
+        if metric_name == "memory_utilization" and len(values) >= 4:
+            peak = float(np.max(arr))
+            if baseline_mean <= 0.50 and peak >= 0.80:
+                return {
+                    "timestamps": timestamps,
+                    "values": values,
+                    "stats": {
+                        "min": float(np.min(arr)),
+                        "max": float(np.max(arr)),
+                        "mean": mean,
+                        "std": std,
+                        "current": current,
+                        "baseline_mean": baseline_mean,
+                        "peak": peak,
+                    },
+                    "anomalous": True,
+                    "note": (
+                        f"CRITICAL: {service_name} memory is SATURATED "
+                        f"(peak={peak:.0%} of cgroup limit, "
+                        f"current={current:.0%}, baseline_mean="
+                        f"{baseline_mean:.0%}). Under Go/JVM runtimes this "
+                        f"can manifest as elevated error_rate without an "
+                        f"OOMKill and without OOMKilled stdout log lines; "
+                        f"`current` may dip below peak during a GC cycle. "
+                        f"This service should be considered a top root "
+                        f"cause candidate."
+                    ),
+                }
 
         # Detect frozen/paused containers: when a container is paused via
         # `docker pause`, the Docker Stats Exporter still reports metrics but

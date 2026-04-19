@@ -78,16 +78,23 @@ def sweep_probes_node(state: AgentState) -> dict[str, Any]:
     the LLM forms hypotheses so the LLM sees ground-truth signals for
     every service — not just the 2-3 it would self-select.
 
-    Four-channel sweep per service:
+    Five-channel metric sweep + one log sweep per service:
 
-    1. ``probe_up``      — catches service_crash / network_partition /
+    1. ``probe_up``            — catches service_crash / network_partition /
        connection_exhaustion (availability drops to 0).
-    2. ``probe_latency`` — catches high_latency (reachable but slow).
-    3. ``cpu_usage``     — catches CPU-saturated services.
-    4. ``memory_usage``  — catches memory pressure (checkoutservice OOM).
-    5. ``search_logs(crash-patterns)`` — catches crash/OOM/fatal log lines
-       (memory_pressure's OOMKilled, config_error's fatal port-bind,
-       currencyservice's std::logic_error in crash-loop, etc.).
+    2. ``probe_latency``       — catches high_latency (reachable but slow).
+    3. ``cpu_usage``           — catches CPU-saturated services and paused
+       containers (frozen rate metrics).
+    4. ``memory_usage``        — raw working-set bytes; preserves the 2σ
+       spike flag for pre-cap memory leaks.
+    5. ``memory_utilization``  — ratio of working_set to cgroup limit.
+       Catches soft memory pressure where Go/JVM runtimes adapt to the
+       new cap without crashing (no OOMKill, no crash logs) — the
+       sharpest localisable signal for this fault class.
+    6. ``search_logs(crash-patterns)`` — catches crash/OOM/fatal log lines
+       (config_error's fatal port-bind, currencyservice's
+       std::logic_error in crash-loop, etc.). Soft memory pressure does
+       NOT produce these log lines; that is what channel 5 covers.
 
     The sweep does NOT decrement ``tool_calls_remaining``. Rationale:
     mandatory infrastructure step, not LLM-directed reasoning.
@@ -113,11 +120,19 @@ def sweep_probes_node(state: AgentState) -> dict[str, Any]:
     critical_signals: list[str] = []  # "svc/metric_or_logs"
     healthy_services: set[str] = set(affected)
 
-    # Channels 1-4: per-service metric probes (probe_up, probe_latency,
-    # cpu_usage, memory_usage). cpu_usage catches memory_pressure-adjacent
-    # CPU spikes; memory_usage catches memory saturation directly.
+    # Channels 1-5: per-service metric probes (probe_up, probe_latency,
+    # cpu_usage, memory_usage, memory_utilization). memory_utilization is the
+    # ratio of working_set to cgroup limit — fires CRITICAL for soft memory
+    # pressure where the service stays "up" from probe/logs perspective but
+    # its working set clamps near the cap (Go/JVM GC adaptation).
     for svc in affected:
-        for metric in ("probe_up", "probe_latency", "cpu_usage", "memory_usage"):
+        for metric in (
+            "probe_up",
+            "probe_latency",
+            "cpu_usage",
+            "memory_usage",
+            "memory_utilization",
+        ):
             qm_args: dict[str, Any] = {
                 "service_name": svc,
                 "metric_name": metric,
@@ -154,7 +169,7 @@ def sweep_probes_node(state: AgentState) -> dict[str, Any]:
                 critical_signals.append(f"{svc}/{metric}")
                 healthy_services.discard(svc)
 
-    # Channel 5: per-service crash-log sweep. search_logs escalates to
+    # Channel 6: per-service crash-log sweep. search_logs escalates to
     # critical_service when ≥3 crash/OOM/fatal patterns match (see
     # _detect_crash_signal in search_logs.py).
     for svc in affected:
@@ -202,23 +217,22 @@ def sweep_probes_node(state: AgentState) -> dict[str, Any]:
 
     summary_lines = [
         "Probe+metric+log sweep complete (breadth-first across all affected "
-        "services: probe_up, probe_latency, cpu_usage, memory_usage, and "
-        "crash-pattern logs).",
+        "services: probe_up, probe_latency, cpu_usage, memory_usage, "
+        "memory_utilization, and crash-pattern logs).",
     ]
     if critical_signals:
         summary_lines.append(f"CRITICAL signals: {', '.join(critical_signals)}")
     healthy_now = sorted(healthy_services)
     if healthy_now:
-        summary_lines.append(
-            f"No CRITICAL flag across any channel for: {', '.join(healthy_now)}"
-        )
+        summary_lines.append(f"No CRITICAL flag across any channel for: {', '.join(healthy_now)}")
     summary_lines.append(
         "Use the above data as your starting point. Do NOT re-query probe_up, "
-        "probe_latency, cpu_usage, memory_usage, or crash-pattern logs for "
-        "services already covered — investigate different metrics (network "
-        "rates, non-crash log patterns) or the same metrics on OTHER services "
-        "to confirm or refute hypotheses. If a service is flagged CRITICAL "
-        "above, prioritise it as a root-cause candidate."
+        "probe_latency, cpu_usage, memory_usage, memory_utilization, or "
+        "crash-pattern logs for services already covered — investigate "
+        "different metrics (network rates, error_rate, non-crash log "
+        "patterns) or the same metrics on OTHER services to confirm or "
+        "refute hypotheses. If a service is flagged CRITICAL above, "
+        "prioritise it as a root-cause candidate."
     )
 
     sweep_message = AIMessage(content="\n".join(summary_lines))
