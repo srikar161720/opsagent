@@ -59,6 +59,64 @@ def _resolve_script(fault_type: str) -> str:
     return str(PROJECT_ROOT / FAULT_SCRIPTS[fault_type])
 
 
+# Default paths for the fine-tuned LSTM-AE model + z-score normalization stats
+# used by ADOnlyBaseline. These are the artifacts produced by the Session 8
+# fine-tune run (see PROGRESS.md Week 6.5). If either is missing at run time,
+# ADOnlyBaseline logs a warning and falls back to its built-in raw-variance
+# heuristic — the run still completes but its Recall@1 is under-representative
+# of the proper LSTM-AE baseline.
+_LSTM_AE_CHECKPOINT = "models/lstm_autoencoder/finetuned_otel.pt"
+_LSTM_AE_SCALER_DIR = "data/splits/otel"
+
+_VALID_BASELINES = ("rule-based", "ad-only", "llm-no-tools")
+
+
+def _build_investigator(baseline_kind: str | None) -> Any:
+    """Return the object whose ``.investigate(alert, start_time=...)`` will
+    drive each test in the fault-injection suite.
+
+    - ``baseline_kind is None`` (default): returns a real ``AgentExecutor``
+      loaded from ``configs/agent_config.yaml`` — bit-for-bit identical to
+      the Session 13 invocation pattern.
+    - ``"rule-based"`` / ``"ad-only"`` / ``"llm-no-tools"``: returns a
+      ``BaselineInvestigatorAdapter`` wrapping the corresponding baseline
+      class. The adapter upshapes the baseline's 3-field ``predict()``
+      return into the 6-field shape the harness expects.
+
+    Unknown ``baseline_kind`` values raise ``ValueError`` listing the valid
+    choices — surfaces typos as CLI errors rather than silent fallbacks.
+    """
+    if baseline_kind is None:
+        from src.agent.executor import AgentExecutor
+
+        return AgentExecutor.from_config("configs/agent_config.yaml")
+
+    from tests.evaluation.baseline_comparison import (
+        ADOnlyBaseline,
+        BaselineInvestigatorAdapter,
+        LLMWithoutToolsBaseline,
+        RuleBasedBaseline,
+    )
+
+    if baseline_kind == "rule-based":
+        return BaselineInvestigatorAdapter(RuleBasedBaseline(), kind="rule-based")
+    if baseline_kind == "ad-only":
+        return BaselineInvestigatorAdapter(
+            ADOnlyBaseline(
+                model_path=_LSTM_AE_CHECKPOINT,
+                scaler_dir=_LSTM_AE_SCALER_DIR,
+            ),
+            kind="ad-only",
+        )
+    if baseline_kind == "llm-no-tools":
+        return BaselineInvestigatorAdapter(LLMWithoutToolsBaseline(), kind="llm-no-tools")
+
+    raise ValueError(
+        f"Unknown baseline '{baseline_kind}'. "
+        f"Valid choices: {', '.join(_VALID_BASELINES)}."
+    )
+
+
 def run_fault_injection(
     fault_type: str,
     run_id: int,
@@ -250,11 +308,19 @@ def main() -> None:
             "fault types (default: 42). Ignored when --fault is set."
         ),
     )
+    parser.add_argument(
+        "--baseline",
+        choices=list(_VALID_BASELINES),
+        default=None,
+        help=(
+            "Swap the OpsAgent investigator for an internal comparison "
+            "baseline. When set, each test uses the named baseline in place "
+            "of AgentExecutor. Default (unset) runs OpsAgent as in Session 13."
+        ),
+    )
     args = parser.parse_args()
 
-    from src.agent.executor import AgentExecutor
-
-    agent = AgentExecutor.from_config("configs/agent_config.yaml")
+    agent = _build_investigator(args.baseline)
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)

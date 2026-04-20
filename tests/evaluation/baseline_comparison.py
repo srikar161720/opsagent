@@ -15,14 +15,22 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
+from dotenv import load_dotenv
 
 from src.data_collection.metrics_collector import MetricsCollector
+
+# Load .env so GEMINI_API_KEY is available to LLMWithoutToolsBaseline when
+# the baselines are run via `fault_injection_suite.py --baseline llm-no-tools`
+# (the OpsAgent path already calls load_dotenv() inside src/agent/graph.py,
+# but the baseline path doesn't import that module).
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -249,9 +257,21 @@ class LLMWithoutToolsBaseline:
         )
 
         try:
+            # Pass google_api_key explicitly so the baseline works regardless
+            # of whether langchain's auto-detection picks up the env var.
+            # load_dotenv() at module level ensures GEMINI_API_KEY is loaded
+            # from .env (same pattern as src/agent/graph.py).
+            #
+            # max_retries=3 wraps the invoke() call in tenacity retry logic
+            # so transient network errors (macOS DNS cache blips, Gemini 429
+            # rate limits, 5xx) don't cost a whole 35-test run a test.
+            # Matches src/agent/graph.py:_get_llm()'s max_retries=3 for
+            # consistency with the OpsAgent path.
             llm = ChatGoogleGenerativeAI(
                 model=self.model_name,
                 temperature=0.1,
+                google_api_key=os.environ.get("GEMINI_API_KEY", ""),
+                max_retries=3,
             )
             response = llm.invoke(prompt)
             content = (
@@ -295,6 +315,67 @@ class LLMWithoutToolsBaseline:
             "root_cause": root_cause,
             "top_3_predictions": top3,
             "confidence": confidence,
+        }
+
+
+class BaselineInvestigatorAdapter:
+    """Adapts a ``*Baseline.predict() -> dict-of-3`` to match the shape of
+    ``AgentExecutor.investigate() -> dict-of-6`` that the fault-injection
+    harness expects.
+
+    ``fault_injection_suite.run_fault_injection()`` calls
+    ``agent.investigate(alert=..., start_time=...)`` and reads six keys
+    from the return (``root_cause``, ``root_cause_confidence``,
+    ``top_3_predictions``, ``confidence``, ``rca_report``,
+    ``recommended_actions``). Baselines expose a simpler
+    ``predict(alert, services) -> {root_cause, top_3_predictions, confidence}``.
+    This adapter upshapes that return and synthesises a minimal RCA-report
+    stub — baselines do not generate structured reports, and are evaluated
+    purely on the correctness of ``root_cause`` / ``top_3_predictions``.
+
+    ``start_time`` is accepted for API parity with ``AgentExecutor.investigate``
+    but deliberately ignored — the three baselines are point-in-time (they
+    query the live ``MetricsCollector`` at call time), matching what
+    OpsAgent's tool layer sees when it runs at the same pre-investigation
+    wait offset.
+
+    The ``services`` kwarg to the wrapped baseline is sourced from
+    ``alert["affected_services"]`` so currencyservice (intentionally
+    excluded from the evaluation suite's alert payload per the Session 12
+    gotcha) also stays out of baseline predictions.
+    """
+
+    def __init__(self, baseline: Any, kind: str) -> None:
+        self.baseline = baseline
+        self.kind = kind
+
+    def investigate(
+        self,
+        alert: dict[str, Any],
+        start_time: str | None = None,
+    ) -> dict[str, Any]:
+        # Silently accept start_time — baselines don't pin windows.
+        del start_time
+        services = alert.get("affected_services", []) or None
+        pred = self.baseline.predict(alert, services=services)
+
+        root_cause = pred.get("root_cause") or "unknown"
+        confidence = float(pred.get("confidence", 0.0) or 0.0)
+        top_3 = list(pred.get("top_3_predictions") or [])
+
+        top_3_str = ", ".join(top_3) if top_3 else "n/a"
+        rca_report = (
+            f"[baseline:{self.kind}] Predicted root cause: {root_cause} "
+            f"(confidence {confidence:.2f}). Top-3: {top_3_str}."
+        )
+
+        return {
+            "root_cause": root_cause,
+            "root_cause_confidence": confidence,
+            "top_3_predictions": top_3,
+            "confidence": confidence,
+            "rca_report": rca_report,
+            "recommended_actions": [],
         }
 
 

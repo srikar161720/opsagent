@@ -10,6 +10,7 @@ import pytest
 
 from tests.evaluation.baseline_comparison import (
     ADOnlyBaseline,
+    BaselineInvestigatorAdapter,
     LLMWithoutToolsBaseline,
     RuleBasedBaseline,
     run_all_baselines,
@@ -199,6 +200,30 @@ class TestLLMWithoutToolsBaseline:
         result = baseline._parse_response(response, ["cartservice"])
         assert result["confidence"] == 0.5  # default
 
+    @patch("langchain_google_genai.ChatGoogleGenerativeAI")
+    def test_predict_wires_max_retries_3(self, mock_llm_cls: MagicMock) -> None:
+        """predict() must construct ChatGoogleGenerativeAI with max_retries=3
+        so transient network errors (macOS DNS cache blips, Gemini rate-limit
+        429s, transient 5xx) don't silently abort a whole 35-test run. Matches
+        the max_retries setting on the OpsAgent path in src/agent/graph.py."""
+        mock_llm_instance = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "cartservice\ncartservice\nredis\n0.7"
+        mock_llm_instance.invoke.return_value = mock_response
+        mock_llm_cls.return_value = mock_llm_instance
+
+        collector = _mock_collector()
+        baseline = LLMWithoutToolsBaseline(collector=collector)
+        baseline.predict(SAMPLE_ALERT, services=["cartservice", "redis"])
+
+        # Verify max_retries=3 was passed to the constructor
+        assert mock_llm_cls.called, "ChatGoogleGenerativeAI was not instantiated"
+        call_kwargs = mock_llm_cls.call_args.kwargs
+        assert call_kwargs.get("max_retries") == 3, (
+            f"max_retries must be 3 (got {call_kwargs.get('max_retries')!r}). "
+            f"Kept in sync with src/agent/graph.py:_get_llm()."
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestRunAllBaselines
@@ -291,3 +316,120 @@ class TestRunAllBaselines:
         empty_dir.mkdir()
         summaries = run_all_baselines(results_dir=str(empty_dir))
         assert summaries == {}
+
+
+# ---------------------------------------------------------------------------
+# TestBaselineInvestigatorAdapter
+# ---------------------------------------------------------------------------
+class TestBaselineInvestigatorAdapter:
+    """The adapter wraps a *Baseline.predict() so its 3-field return can be
+    consumed by the fault-injection harness which expects AgentExecutor's
+    6-field ``investigate()`` shape. Lets ``run_fault_injection()`` treat
+    baselines and OpsAgent interchangeably.
+    """
+
+    def _fake_baseline(self, predict_return: dict) -> MagicMock:
+        """Build a baseline mock whose predict(...) returns a given dict."""
+        b = MagicMock()
+        b.predict.return_value = predict_return
+        return b
+
+    def test_adapter_upshapes_three_fields_to_six(self) -> None:
+        baseline = self._fake_baseline(
+            {
+                "root_cause": "cartservice",
+                "top_3_predictions": ["cartservice", "redis", "frontend"],
+                "confidence": 0.8,
+            }
+        )
+        adapter = BaselineInvestigatorAdapter(baseline, kind="rule-based")
+        result = adapter.investigate(alert={"affected_services": ["cartservice"]})
+        # All 6 fields expected by fault_injection_suite.run_fault_injection()
+        # must be present and well-typed.
+        for key in (
+            "root_cause",
+            "root_cause_confidence",
+            "top_3_predictions",
+            "confidence",
+            "rca_report",
+            "recommended_actions",
+        ):
+            assert key in result, f"missing key: {key}"
+        assert result["root_cause"] == "cartservice"
+        assert result["root_cause_confidence"] == pytest.approx(0.8)
+        assert result["confidence"] == pytest.approx(0.8)
+        assert result["top_3_predictions"] == ["cartservice", "redis", "frontend"]
+        assert "cartservice" in result["rca_report"]
+        assert result["recommended_actions"] == []
+
+    def test_adapter_passes_services_from_alert(self) -> None:
+        """`affected_services` in the alert must propagate to the baseline's
+        `services` kwarg so currencyservice (intentionally excluded from
+        alerts per Session 12) stays out of baseline predictions too."""
+        baseline = self._fake_baseline(
+            {
+                "root_cause": "frontend",
+                "top_3_predictions": ["frontend"],
+                "confidence": 0.5,
+            }
+        )
+        adapter = BaselineInvestigatorAdapter(baseline, kind="rule-based")
+        alert = {
+            "affected_services": [
+                "cartservice",
+                "checkoutservice",
+                "frontend",
+                "paymentservice",
+                "productcatalogservice",
+                "redis",
+            ],
+        }
+        adapter.investigate(alert=alert)
+        call = baseline.predict.call_args
+        assert call.kwargs["services"] == alert["affected_services"]
+        assert "currencyservice" not in call.kwargs["services"]
+
+    def test_adapter_ignores_start_time(self) -> None:
+        """Baselines are point-in-time; they don't honour start_time pinning.
+        The adapter accepts the kwarg silently so the harness can pass it
+        uniformly regardless of investigator type."""
+        baseline = self._fake_baseline(
+            {"root_cause": "redis", "top_3_predictions": ["redis"], "confidence": 0.4}
+        )
+        adapter = BaselineInvestigatorAdapter(baseline, kind="ad-only")
+        # Should not raise even though start_time is ISO-8601.
+        result = adapter.investigate(
+            alert={"affected_services": ["redis"]},
+            start_time="2026-04-19T10:00:00+00:00",
+        )
+        assert result["root_cause"] == "redis"
+
+    def test_adapter_defensive_on_missing_keys(self) -> None:
+        """A malformed baseline return (missing keys) must not crash the
+        adapter. Safe defaults: 'unknown' root_cause, [] top_3, 0.0
+        confidence."""
+        baseline = self._fake_baseline({})  # empty dict
+        adapter = BaselineInvestigatorAdapter(baseline, kind="llm-no-tools")
+        result = adapter.investigate(alert={"affected_services": []})
+        assert result["root_cause"] == "unknown"
+        assert result["top_3_predictions"] == []
+        assert result["confidence"] == pytest.approx(0.0)
+        assert result["root_cause_confidence"] == pytest.approx(0.0)
+        # Even on a degenerate return, the RCA-report stub is a non-empty string.
+        assert isinstance(result["rca_report"], str)
+        assert len(result["rca_report"]) > 0
+
+    def test_adapter_kind_surfaces_in_report(self) -> None:
+        """The `kind` tag must appear in the synthesised rca_report so RCA-report
+        files for different baselines are distinguishable post-hoc."""
+        baseline = self._fake_baseline(
+            {
+                "root_cause": "paymentservice",
+                "top_3_predictions": ["paymentservice"],
+                "confidence": 0.6,
+            }
+        )
+        for kind in ("rule-based", "ad-only", "llm-no-tools"):
+            adapter = BaselineInvestigatorAdapter(baseline, kind=kind)
+            result = adapter.investigate(alert={"affected_services": ["paymentservice"]})
+            assert f"[baseline:{kind}]" in result["rca_report"]

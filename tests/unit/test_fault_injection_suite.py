@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from tests.evaluation.fault_injection_suite import (
     FAULT_SCRIPTS,
     GROUND_TRUTH,
+    _build_investigator,
     _load_per_fault_cooldowns,
     _resolve_script,
     _shuffled_faults,
@@ -147,9 +149,7 @@ class TestRunFaultInjection:
         affected service. v1.10.0 currencyservice SIGSEGVs continuously in
         baseline; surfacing it to the agent causes consistent misattribution
         (see Session 12 diagnosis in fault_injection_suite.py comment)."""
-        run_fault_injection(
-            "service_crash", 1, tmp_path, mock_agent, max_wait_seconds=120
-        )
+        run_fault_injection("service_crash", 1, tmp_path, mock_agent, max_wait_seconds=120)
         # The mock agent's investigate() received the alert as a kwarg.
         alert = mock_agent.investigate.call_args.kwargs["alert"]
         affected = alert["affected_services"]
@@ -357,3 +357,134 @@ class TestShuffledFaults:
         original = ["a", "b", "c"]
         _shuffled_faults(original, seed=7)
         assert original == ["a", "b", "c"]
+
+
+# ---------------------------------------------------------------------------
+# TestBaselineFactory
+# ---------------------------------------------------------------------------
+class TestBaselineFactory:
+    """`_build_investigator(kind)` swaps AgentExecutor for a BaselineInvestigatorAdapter.
+
+    When kind is None the factory returns the real OpsAgent; when kind is
+    one of the three supported strings it returns an adapter wrapping the
+    matching *Baseline. Uknown kinds raise ValueError so typos surface
+    as CLI errors rather than silent fallbacks.
+    """
+
+    def test_build_investigator_default_returns_agent_executor(self) -> None:
+        """kind=None path: return the real AgentExecutor loaded from config.
+
+        We patch `AgentExecutor.from_config` rather than the class itself so
+        the test doesn't touch the real `configs/agent_config.yaml` / LLM.
+        """
+        sentinel = MagicMock(name="agent_executor_instance")
+        with patch(
+            "src.agent.executor.AgentExecutor.from_config",
+            return_value=sentinel,
+        ) as mock_from_config:
+            result = _build_investigator(None)
+        mock_from_config.assert_called_once_with("configs/agent_config.yaml")
+        assert result is sentinel
+
+    def test_build_investigator_rule_based(self) -> None:
+        from tests.evaluation.baseline_comparison import (
+            BaselineInvestigatorAdapter,
+            RuleBasedBaseline,
+        )
+
+        # Patch MetricsCollector inside baseline_comparison so we don't need
+        # a live Prometheus during construction.
+        with patch("tests.evaluation.baseline_comparison.MetricsCollector"):
+            result = _build_investigator("rule-based")
+        assert isinstance(result, BaselineInvestigatorAdapter)
+        assert result.kind == "rule-based"
+        assert isinstance(result.baseline, RuleBasedBaseline)
+
+    def test_build_investigator_ad_only(self) -> None:
+        from tests.evaluation.baseline_comparison import (
+            ADOnlyBaseline,
+            BaselineInvestigatorAdapter,
+        )
+
+        # Patch torch.load + scaler-file existence so the factory doesn't
+        # require the real checkpoint in the test environment.
+        with (
+            patch("tests.evaluation.baseline_comparison.MetricsCollector"),
+            patch("pathlib.Path.exists", return_value=False),
+        ):
+            result = _build_investigator("ad-only")
+        assert isinstance(result, BaselineInvestigatorAdapter)
+        assert result.kind == "ad-only"
+        assert isinstance(result.baseline, ADOnlyBaseline)
+
+    def test_build_investigator_llm_no_tools(self) -> None:
+        from tests.evaluation.baseline_comparison import (
+            BaselineInvestigatorAdapter,
+            LLMWithoutToolsBaseline,
+        )
+
+        with patch("tests.evaluation.baseline_comparison.MetricsCollector"):
+            result = _build_investigator("llm-no-tools")
+        assert isinstance(result, BaselineInvestigatorAdapter)
+        assert result.kind == "llm-no-tools"
+        assert isinstance(result.baseline, LLMWithoutToolsBaseline)
+
+    def test_build_investigator_unknown_raises(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            _build_investigator("gradient-boosted-mlm-pyramid")
+        # Error message should list the three valid choices so CLI users
+        # can self-correct without reading code.
+        msg = str(exc_info.value)
+        assert "rule-based" in msg
+        assert "ad-only" in msg
+        assert "llm-no-tools" in msg
+
+    def test_main_accepts_baseline_flag(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """argparse must accept `--baseline rule-based` and pass it through
+        to `_build_investigator`. The test swaps in a fake factory so the
+        full suite doesn't actually run (no Docker, no real baseline
+        construction)."""
+        from tests.evaluation.fault_injection_suite import main as suite_main
+
+        captured: dict[str, Any] = {}
+
+        def fake_build(kind: str | None) -> MagicMock:
+            captured["kind"] = kind
+            stub = MagicMock(name="stub_investigator")
+            return stub
+
+        # Point --output at a tmp dir so the suite doesn't touch real data.
+        # Limit scope to a single fault that we won't actually run: we patch
+        # run_fault_injection to return immediately so no Docker is invoked.
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "fault_injection_suite",
+                "--baseline",
+                "rule-based",
+                "--fault",
+                "service_crash",
+                "--repetitions",
+                "1",
+                "--output",
+                str(tmp_path / "out"),
+            ],
+        )
+        with (
+            patch(
+                "tests.evaluation.fault_injection_suite._build_investigator",
+                side_effect=fake_build,
+            ),
+            patch(
+                "tests.evaluation.fault_injection_suite.run_fault_injection",
+                return_value={"status": "completed", "is_correct": True},
+            ),
+            patch("tests.evaluation.fault_injection_suite.time.sleep"),
+        ):
+            suite_main()
+
+        assert captured["kind"] == "rule-based"
