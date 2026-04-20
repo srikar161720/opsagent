@@ -146,6 +146,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--baseline",
+        choices=["rule-based", "ad-only", "llm-no-tools"],
+        default=None,
+        help=(
+            "Run a comparison baseline instead of OpsAgent (see "
+            "tests/evaluation/baseline_comparison.py). Default (unset) runs "
+            "OpsAgent exactly as Session 13 did."
+        ),
+    )
+    parser.add_argument(
         "--skip-preflight",
         action="store_true",
         help="Skip preflight checks",
@@ -182,6 +192,8 @@ def main() -> None:
         suite_args.extend(["--cooldown", str(args.cooldown)])
     suite_args.extend(["--max-wait", str(args.max_wait)])
     suite_args.extend(["--seed", str(args.seed)])
+    if args.baseline:
+        suite_args.extend(["--baseline", args.baseline])
 
     original_argv = sys.argv
     sys.argv = suite_args
