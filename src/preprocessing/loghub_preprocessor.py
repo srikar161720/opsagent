@@ -89,10 +89,12 @@ class LogHubHDFSPreprocessor:
         normal = self._build_sequences(label_filter=0)
         anomalous = self._build_sequences(label_filter=1)
         sequences = np.vstack([normal, anomalous])
-        labels = np.concatenate([
-            np.zeros(len(normal), dtype=int),
-            np.ones(len(anomalous), dtype=int),
-        ])
+        labels = np.concatenate(
+            [
+                np.zeros(len(normal), dtype=int),
+                np.ones(len(anomalous), dtype=int),
+            ]
+        )
         return sequences, labels
 
     @property
@@ -110,9 +112,7 @@ class LogHubHDFSPreprocessor:
 
         # HDFS log format: "081109 203615 148 INFO dfs.DataNode$PacketResponder: blk_-..."
         # Strip the structured header before passing to Drain3.
-        hdfs_header_pattern = re.compile(
-            r"^\d{6}\s+\d{6}\s+\d+\s+\w+\s+[\w.$]+:\s*"
-        )
+        hdfs_header_pattern = re.compile(r"^\d{6}\s+\d{6}\s+\d+\s+\w+\s+[\w.$]+:\s*")
 
         with open(log_path, encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -176,9 +176,7 @@ class LogHubHDFSPreprocessor:
 # ── Dataset split helpers ─────────────────────────────────────────────────
 
 
-def create_hdfs_splits(
-    preprocessor: LogHubHDFSPreprocessor, val_ratio: float = 0.2
-) -> dict:
+def create_hdfs_splits(preprocessor: LogHubHDFSPreprocessor, val_ratio: float = 0.2) -> dict:
     """Create train/val split from LogHub HDFS normal sequences for LSTM-AE pretraining.
 
     Only NORMAL sequences are used for unsupervised pretraining.
@@ -188,9 +186,7 @@ def create_hdfs_splits(
         dict with keys: train, val, input_dim
     """
     normal_seqs = preprocessor.get_normal_sequences()
-    train_seqs, val_seqs = train_test_split(
-        normal_seqs, test_size=val_ratio, random_state=42
-    )
+    train_seqs, val_seqs = train_test_split(normal_seqs, test_size=val_ratio, random_state=42)
     return {
         "train": train_seqs,
         "val": val_seqs,
