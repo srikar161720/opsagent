@@ -15,16 +15,29 @@ import networkx as nx
 
 
 class TopologyGraph:
-    """Static directed service dependency graph for the OTel Demo stack.
+    """Static directed service dependency graph for the OTel Astronomy Shop.
 
-    7 nodes: 6 core OTel Demo services + Redis.
-    9 edges representing synchronous call dependencies.
+    Full Online Boutique topology: 11 nodes (7 core OTel Demo services + Redis
+    + 4 OB-only services that appear in RCAEval ground-truth labels). The
+    reduced local OTel Demo stack only actually runs 6 services + Redis,
+    but we expose the full OB topology so the agent can reason about
+    RCAEval RE1-OB / RE2-OB / RE3-OB cases whose root cause is one of
+    ``adservice``, ``emailservice``, ``recommendationservice``, or
+    ``shippingservice``.
+
+    Safe on live OTel Demo: services that aren't running produce empty
+    metric data, which ``query_metrics`` returns as a neutral note
+    (``anomalous=False``) — not a CRITICAL signal. The extra nodes do not
+    cause misattribution during the Session 13 fault-injection suite
+    (verified by spot-check).
+
+    Edge format: ``(dependency, dependent)`` — dependency is upstream.
     """
 
-    # OTel Astronomy Shop service dependencies (7 nodes: 6 core services + redis)
-    # Excluded from reduced stack: emailservice, shippingservice, recommendationservice, adservice
-    # Format: (dependency, dependent) — dependency is upstream of dependent
+    # Full OTel Astronomy Shop / Online Boutique dependency graph.
+    # ``(dep, dependent)`` means ``dep`` is called by ``dependent``.
     KNOWN_EDGES: list[tuple[str, str]] = [
+        # Core (reduced) OTel Demo edges — active on the local stack
         ("redis", "cartservice"),
         ("cartservice", "checkoutservice"),
         ("productcatalogservice", "checkoutservice"),
@@ -34,6 +47,16 @@ class TopologyGraph:
         ("productcatalogservice", "frontend"),
         ("checkoutservice", "frontend"),
         ("currencyservice", "frontend"),
+        # Extended OB edges — only relevant for RCAEval-OB cases. These
+        # services are not running in the reduced local stack, so
+        # ``query_metrics`` returns empty (neutral) responses for them
+        # during live OTel Demo fault injection — they cannot be
+        # misattributed.
+        ("adservice", "frontend"),
+        ("recommendationservice", "frontend"),
+        ("productcatalogservice", "recommendationservice"),
+        ("emailservice", "checkoutservice"),
+        ("shippingservice", "checkoutservice"),
     ]
 
     def __init__(self) -> None:
@@ -84,9 +107,7 @@ class TopologyGraph:
         """Serialize the full topology to JSON (used by get_topology agent tool)."""
         return json.dumps(
             {
-                "nodes": [
-                    {"name": n, **self.graph.nodes[n]} for n in self.graph.nodes()
-                ],
+                "nodes": [{"name": n, **self.graph.nodes[n]} for n in self.graph.nodes()],
                 "edges": [
                     {"source": u, "target": v, **self.graph.edges[u, v]}
                     for u, v in self.graph.edges()
