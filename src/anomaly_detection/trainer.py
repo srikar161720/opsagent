@@ -72,9 +72,7 @@ class AnomalyTrainer:
         )
 
         criterion = nn.MSELoss()
-        optimizer = torch.optim.Adam(
-            self.model.parameters(), lr=learning_rate
-        )
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
 
         best_val_loss = float("inf")
         patience_counter = 0
@@ -123,8 +121,7 @@ class AnomalyTrainer:
                 patience_counter += 1
                 if patience_counter >= early_stopping_patience:
                     print(
-                        f"Early stopping at epoch {epoch + 1} "
-                        f"(patience={early_stopping_patience})"
+                        f"Early stopping at epoch {epoch + 1} (patience={early_stopping_patience})"
                     )
                     break
 

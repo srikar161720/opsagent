@@ -42,9 +42,7 @@ def pretrain_on_hdfs(
     # 1. Parse HDFS logs
     if parser is None:
         parser = LogParser()
-    preprocessor = LogHubHDFSPreprocessor(
-        data_dir=hdfs_data_path, seq_length=10, parser=parser
-    )
+    preprocessor = LogHubHDFSPreprocessor(data_dir=hdfs_data_path, seq_length=10, parser=parser)
 
     print("Parsing HDFS.log (this may take several minutes)...")
     preprocessor.parse()
@@ -55,9 +53,7 @@ def pretrain_on_hdfs(
     normal_seqs = preprocessor.get_normal_sequences()  # (N, seq_len) int32
     print(f"  Normal sequences: {normal_seqs.shape[0]}")
 
-    train_seqs, val_seqs = train_test_split(
-        normal_seqs, test_size=0.2, random_state=42
-    )
+    train_seqs, val_seqs = train_test_split(normal_seqs, test_size=0.2, random_state=42)
 
     # 3. One-hot encode template IDs → (N, seq_len, n_templates)
     train_data = _one_hot_encode(train_seqs, n_templates)
@@ -108,9 +104,7 @@ def finetune_on_otel_demo(
 
     # Load pretrained weights — handle dimension mismatch gracefully
     try:
-        checkpoint = torch.load(
-            pretrained_model_path, map_location="cpu"
-        )
+        checkpoint = torch.load(pretrained_model_path, map_location="cpu")
         state_dict = checkpoint
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
             state_dict = checkpoint["model_state_dict"]
@@ -141,9 +135,7 @@ def finetune_on_otel_demo(
     return model
 
 
-def _load_compatible_weights(
-    model: LSTMAutoencoder, checkpoint_path: str
-) -> None:
+def _load_compatible_weights(model: LSTMAutoencoder, checkpoint_path: str) -> None:
     """Load only LSTM body weights from checkpoint; skip I/O layers if dims differ.
 
     Transfers encoder/decoder LSTM weights and latent projection weights.
@@ -168,9 +160,7 @@ def _load_compatible_weights(
     model_state.update(compatible)
     model.load_state_dict(model_state)
 
-    print(
-        f"_load_compatible_weights: loaded {len(compatible)}/{len(checkpoint)} tensors."
-    )
+    print(f"_load_compatible_weights: loaded {len(compatible)}/{len(checkpoint)} tensors.")
     print("  Transferred: encoder, decoder, latent projection weights.")
     print("  Skipped: embedding, output_layer (input_dim mismatch).")
 

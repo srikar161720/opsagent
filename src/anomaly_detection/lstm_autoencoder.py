@@ -99,7 +99,5 @@ class LSTMAutoencoder(nn.Module):
             Tensor of shape ``(batch,)`` with MSE per sequence.
         """
         reconstructed = self.forward(x)
-        error: torch.Tensor = torch.mean(
-            (x - reconstructed) ** 2, dim=(1, 2)
-        )
+        error: torch.Tensor = torch.mean((x - reconstructed) ** 2, dim=(1, 2))
         return error
