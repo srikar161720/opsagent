@@ -34,10 +34,11 @@ class TestToolInvocation:
     """Tests that each tool can be invoked against live services."""
 
     def test_get_topology_live(self) -> None:
+        """Full OB topology has 11 nodes (reduced 7 + OB-only 4)."""
         from src.agent.tools.get_topology import get_topology
 
         result = get_topology.invoke({"service_name": None})
-        assert len(result["nodes"]) == 7
+        assert len(result["nodes"]) == 11
 
     def test_query_metrics_live(self) -> None:
         from src.agent.tools.query_metrics import query_metrics

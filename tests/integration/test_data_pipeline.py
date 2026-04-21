@@ -73,13 +73,14 @@ class TestTopologyIntegration:
     """Tests for the TopologyGraph."""
 
     def test_topology_produces_valid_json(self) -> None:
+        """Full OB topology: 11 nodes (reduced 7 + OB-only 4), 14 edges."""
         from src.data_collection.topology_extractor import TopologyGraph
 
         topo = TopologyGraph()
         json_str = topo.to_json()
         parsed = json.loads(json_str)
-        assert len(parsed["nodes"]) == 7
-        assert len(parsed["edges"]) == 9
+        assert len(parsed["nodes"]) == 11
+        assert len(parsed["edges"]) == 14
 
     def test_subgraph_for_each_service(self) -> None:
         from src.data_collection.topology_extractor import TopologyGraph

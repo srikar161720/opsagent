@@ -22,6 +22,92 @@ class TestGetLLM:
             kwargs = mock_llm_cls.call_args.kwargs
             assert kwargs["model"] == "gemini-3-flash-preview"
 
+    def test_uses_max_retries_6(self) -> None:
+        """_get_llm must set max_retries=6 for Gemini API rate-limit resilience.
+
+        Tenacity's exponential backoff at 6 retries gives ~1+2+4+8+16+32 = 63s
+        of tolerance per LLM call — long enough to clear a per-minute rate-
+        limit window on gemini-3-flash-preview. Bumped from =3 in Session 15
+        after RCAEval RE1-OB hit sustained 429 RESOURCE_EXHAUSTED."""
+        from src.agent import graph
+
+        with patch.object(graph, "ChatGoogleGenerativeAI") as mock_llm_cls:
+            graph._get_llm()
+            kwargs = mock_llm_cls.call_args.kwargs
+            assert kwargs["max_retries"] == 6, (
+                f"max_retries must be 6 (got {kwargs.get('max_retries')!r}). "
+                f"Kept in sync with tests/evaluation/baseline_comparison.py's "
+                f"LLMWithoutToolsBaseline.predict()."
+            )
+
+    def test_live_factory_uses_gemini_3_flash_preview(self) -> None:
+        """_get_llm_live() uses Gemini 3 Flash Preview — preserves Session
+        13's 100% Recall@1 on live OTel Demo fault injection."""
+        from src.agent import graph
+
+        with patch.object(graph, "ChatGoogleGenerativeAI") as mock_llm_cls:
+            graph._get_llm_live()
+            kwargs = mock_llm_cls.call_args.kwargs
+            assert kwargs["model"] == "gemini-3-flash-preview"
+            assert kwargs["max_retries"] == 6
+
+    def test_offline_factory_uses_gemini_2_5_flash(self) -> None:
+        """_get_llm_offline() uses Gemini 2.5 Flash (production model) —
+        avoids the preview-model rate-limit caps that made RCAEval runs
+        fail with 429 RESOURCE_EXHAUSTED even after RPD reset."""
+        from src.agent import graph
+
+        with patch.object(graph, "ChatGoogleGenerativeAI") as mock_llm_cls:
+            graph._get_llm_offline()
+            kwargs = mock_llm_cls.call_args.kwargs
+            assert kwargs["model"] == "gemini-2.5-flash", (
+                f"Offline LLM must be gemini-2.5-flash (production, higher "
+                f"quotas). Got {kwargs.get('model')!r}."
+            )
+            assert kwargs["max_retries"] == 6
+
+    def test_dispatcher_picks_live_when_no_preloaded_metrics(self) -> None:
+        """State without preloaded_metrics → live Gemini 3 Preview LLM."""
+        from src.agent import graph
+
+        state = {"preloaded_metrics": None}
+        with (
+            patch.object(graph, "_get_llm_live") as mock_live,
+            patch.object(graph, "_get_llm_offline") as mock_offline,
+        ):
+            graph._get_llm_for_state(state)
+            mock_live.assert_called_once()
+            mock_offline.assert_not_called()
+
+    def test_dispatcher_picks_offline_when_preloaded_metrics_set(self) -> None:
+        """State with preloaded_metrics → offline Gemini 2.5 Flash LLM.
+
+        This is the Path B fix: RCAEval evaluator passes preloaded
+        DataFrames, so the agent automatically uses the production
+        model instead of the rate-limited preview model."""
+        from src.agent import graph
+
+        state = {"preloaded_metrics": {"cartservice": object()}}
+        with (
+            patch.object(graph, "_get_llm_live") as mock_live,
+            patch.object(graph, "_get_llm_offline") as mock_offline,
+        ):
+            graph._get_llm_for_state(state)
+            mock_live.assert_not_called()
+            mock_offline.assert_called_once()
+
+    def test_backward_compat_get_llm_is_live_alias(self) -> None:
+        """_get_llm() (no _for_state suffix) returns the live-mode LLM.
+
+        Kept as backward-compat for any existing callers / older tests.
+        Must be equivalent to _get_llm_live()."""
+        from src.agent import graph
+
+        with patch.object(graph, "_get_llm_live", return_value="SENTINEL") as mock_live:
+            result = graph._get_llm()
+            assert result == "SENTINEL"
+            mock_live.assert_called_once()
+
 
 class TestExtractText:
     """Tests for _extract_text — normalises LLM response.content across
@@ -134,6 +220,64 @@ class TestSystemPrompt:
         # the memory_pressure example.
         assert "memory_utilization" in SYSTEM_PROMPT
         assert "memory pressure" in SYSTEM_PROMPT.lower()
+
+    def test_live_prompt_retains_currencyservice_exclusion(self) -> None:
+        """Session 12's currencyservice-exclusion clause MUST stay in the
+        live-mode prompt. Removing it would regress Session 13's 100%
+        Recall@1 on the OTel Demo fault suite (the v1.10.0 SIGSEGV
+        crash-loop creates permanent probe_up=0 baseline noise that the
+        LLM would otherwise misattribute)."""
+        from src.agent.prompts.system_prompt import SYSTEM_PROMPT
+
+        assert "currencyservice is BROKEN IN BASELINE" in SYSTEM_PROMPT
+        assert "never pick it as root cause" in SYSTEM_PROMPT
+
+    def test_offline_prompt_removes_currencyservice_exclusion(self) -> None:
+        """The offline prompt used by RCAEval evaluation MUST NOT contain
+        the currencyservice-exclusion clause. RCAEval-OB cases have
+        currencyservice as a legitimate fault target; the clause caused
+        0/25 Recall@1 on those cases before the split."""
+        from src.agent.prompts.system_prompt import SYSTEM_PROMPT_OFFLINE
+
+        assert "currencyservice is BROKEN IN BASELINE" not in SYSTEM_PROMPT_OFFLINE
+        assert "never pick it as root cause" not in SYSTEM_PROMPT_OFFLINE
+        assert "BASELINE NOISE" not in SYSTEM_PROMPT_OFFLINE
+
+    def test_offline_prompt_preserves_all_other_content(self) -> None:
+        """OFFLINE differs from SYSTEM_PROMPT ONLY in the currencyservice
+        clause. Every other paragraph, example, directive, and metric
+        reference must be identical."""
+        from src.agent.prompts.system_prompt import SYSTEM_PROMPT, SYSTEM_PROMPT_OFFLINE
+
+        # All 7 examples preserved
+        for marker in (
+            "Example 1: Crashed service",
+            "Example 2: Slow service",
+            "Example 3: Memory pressure",
+            "Example 4: CPU throttling",
+            "Example 5: Connection exhaustion",
+            "Example 6: Network partition",
+            "Example 7: Config error",
+        ):
+            assert marker in SYSTEM_PROMPT_OFFLINE, f"Missing from OFFLINE: {marker}"
+
+        # Redis guidance (distinct from the currencyservice clause) stays
+        assert "Redis has naturally high CPU variance" in SYSTEM_PROMPT_OFFLINE
+        # Anti-bias directive stays
+        assert "Do not default to any service" in SYSTEM_PROMPT_OFFLINE
+        # Memory guidance stays
+        assert "memory_utilization" in SYSTEM_PROMPT_OFFLINE
+        # Bullet-separator whitespace is clean (no double-blank-line scar
+        # from the removed clause)
+        assert "\n\n\n\n" not in SYSTEM_PROMPT_OFFLINE
+
+        # The only difference should be the clause length (~633 chars)
+        diff = len(SYSTEM_PROMPT) - len(SYSTEM_PROMPT_OFFLINE)
+        assert 500 < diff < 800, (
+            f"Unexpected size diff {diff} between SYSTEM_PROMPT and "
+            f"SYSTEM_PROMPT_OFFLINE — only the currencyservice clause "
+            f"(~633 chars) should differ"
+        )
 
 
 class TestBuildGraph:
@@ -613,7 +757,7 @@ class TestGenerateReportNode:
             "relevant_runbooks": [],
             "messages": [],
         }
-        with patch.object(graph, "_get_llm", return_value=fake_llm()):
+        with patch.object(graph, "_get_llm_for_state", return_value=fake_llm()):
             result = graph.generate_report_node(state)
         report = result["rca_report"]
         assert "A --> B [0.9]" in report
@@ -639,7 +783,7 @@ class TestGenerateReportNode:
             "relevant_runbooks": [],
             "messages": [],
         }
-        with patch.object(graph, "_get_llm", return_value=_FakeLLM()):
+        with patch.object(graph, "_get_llm_for_state", return_value=_FakeLLM()):
             result = graph.generate_report_node(state)
         import re as _re
 
@@ -660,6 +804,113 @@ class TestGenerateReportNode:
         from src.agent.graph import _parse_report_fields
 
         assert _parse_report_fields("hello world") == {}
+
+
+class TestFormHypothesisScopeFilter:
+    """Tests for the post-LLM scope filter in ``form_hypothesis_node``.
+
+    The filter drops hypotheses naming services outside ``affected_services``
+    so Gemini 3's OTel-Demo-biased priors can't leak shippingservice /
+    emailservice / recommendationservice into RCAEval-OB runs where those
+    services don't exist in the case data.
+    """
+
+    def _make_fake_llm(self, hypothesis_json: str):
+        """Build a fake LLM that returns a fixed hypothesis JSON string."""
+
+        class _FakeLLM:
+            def invoke(self, msgs):
+                return type("_R", (), {"content": hypothesis_json})()
+
+        return _FakeLLM()
+
+    def test_filter_drops_out_of_scope_hypotheses(self) -> None:
+        """Hypotheses naming services outside affected_services are dropped."""
+        from src.agent import graph
+
+        payload = (
+            '[{"service": "shippingservice", "reason": "x", "confidence": 0.8}, '
+            '{"service": "cartservice", "reason": "y", "confidence": 0.7}]'
+        )
+        state = {
+            "alert": {},
+            "affected_services": ["cartservice", "checkoutservice"],
+            "evidence": [],
+            "hypotheses": [],
+            "messages": [],
+        }
+        with patch.object(graph, "_get_llm_for_state", return_value=self._make_fake_llm(payload)):
+            result = graph.form_hypothesis_node(state)
+
+        services = [h["service"] for h in result["hypotheses"]]
+        assert "shippingservice" not in services
+        assert "cartservice" in services
+
+    def test_filter_preserves_all_in_scope(self) -> None:
+        """When every hypothesis is in scope, none are dropped."""
+        from src.agent import graph
+
+        payload = (
+            '[{"service": "adservice", "reason": "x", "confidence": 0.9}, '
+            '{"service": "checkoutservice", "reason": "y", "confidence": 0.6}]'
+        )
+        state = {
+            "alert": {},
+            "affected_services": [
+                "adservice",
+                "cartservice",
+                "checkoutservice",
+            ],
+            "evidence": [],
+            "hypotheses": [],
+            "messages": [],
+        }
+        with patch.object(graph, "_get_llm_for_state", return_value=self._make_fake_llm(payload)):
+            result = graph.form_hypothesis_node(state)
+
+        services = [h["service"] for h in result["hypotheses"]]
+        assert services == ["adservice", "checkoutservice"]
+
+    def test_filter_keeps_original_when_all_would_drop(self) -> None:
+        """If the filter would empty the list, keep the original hypotheses
+        so downstream nodes still have signal (top_3 extraction can then
+        fall back to the causal graph for in-scope services)."""
+        from src.agent import graph
+
+        payload = '[{"service": "shippingservice", "reason": "x", "confidence": 0.8}]'
+        state = {
+            "alert": {},
+            "affected_services": ["cartservice", "checkoutservice"],
+            "evidence": [],
+            "hypotheses": [],
+            "messages": [],
+        }
+        with patch.object(graph, "_get_llm_for_state", return_value=self._make_fake_llm(payload)):
+            result = graph.form_hypothesis_node(state)
+
+        services = [h["service"] for h in result["hypotheses"]]
+        assert services == ["shippingservice"], (
+            "When every hypothesis is out of scope, keep the original list "
+            "rather than silencing the LLM entirely"
+        )
+
+    def test_filter_noop_when_no_affected_services(self) -> None:
+        """No filter runs when affected_services is empty (rare live case)."""
+        from src.agent import graph
+
+        payload = '[{"service": "anyservice", "reason": "x", "confidence": 0.5}]'
+        state = {
+            "alert": {},
+            "affected_services": [],
+            "evidence": [],
+            "hypotheses": [],
+            "messages": [],
+        }
+        with patch.object(graph, "_get_llm_for_state", return_value=self._make_fake_llm(payload)):
+            result = graph.form_hypothesis_node(state)
+
+        services = [h["service"] for h in result["hypotheses"]]
+        assert services == ["anyservice"]
 
 
 class TestHelperFunctions:
@@ -732,3 +983,115 @@ Long-term:
         actions = _extract_actions(report)
         assert len(actions) >= 2
         assert "Restart the service" in actions
+
+
+class TestDispatchers:
+    """Tests for the tool-dispatcher functions that route live-vs-offline.
+
+    Cardinal rule: when ``state["preloaded_metrics"]`` is None, the
+    dispatcher is a pure passthrough to the live tool. When it's set, the
+    dispatcher routes to the corresponding offline_data helper.
+    """
+
+    def test_query_metrics_dispatcher_routes_offline_when_preloaded(self) -> None:
+        from src.agent import graph
+
+        state = {"preloaded_metrics": {"cartservice": MagicMock()}, "preloaded_logs": None}
+        args = {
+            "service_name": "cartservice",
+            "metric_name": "cpu_usage",
+            "time_range_minutes": 10,
+        }
+        with patch.object(graph.offline_data, "query_preloaded_metrics") as mock_offline:
+            mock_offline.return_value = {"anomalous": False, "values": []}
+            graph._dispatch_query_metrics(state, args)
+            assert mock_offline.called
+            # Preloaded metrics threaded through to the helper
+            kwargs = mock_offline.call_args.kwargs
+            assert kwargs["preloaded_metrics"] is state["preloaded_metrics"]
+
+    def test_query_metrics_dispatcher_routes_live_when_no_preload(self) -> None:
+        from src.agent import graph
+
+        state = {"preloaded_metrics": None, "preloaded_logs": None}
+        args = {"service_name": "cartservice", "metric_name": "cpu_usage"}
+        mock_tool = MagicMock()
+        mock_tool.invoke.return_value = {"anomalous": False}
+        with patch("src.agent.tools.query_metrics.query_metrics", mock_tool):
+            graph._dispatch_query_metrics(state, args)
+            mock_tool.invoke.assert_called_once_with(args)
+
+    def test_search_logs_dispatcher_routes_offline_when_preloaded(self) -> None:
+        from src.agent import graph
+
+        # Offline mode is triggered by preloaded_metrics being truthy —
+        # logs may still be None (RE1 has no logs).
+        state = {
+            "preloaded_metrics": {"cart": MagicMock()},
+            "preloaded_logs": None,
+        }
+        args = {"query": "error", "service_filter": "cart", "time_range_minutes": 10}
+        with patch.object(graph.offline_data, "search_preloaded_logs") as mock_offline:
+            mock_offline.return_value = {"entries": [], "crash_match_count": 0}
+            graph._dispatch_search_logs(state, args)
+            assert mock_offline.called
+            # Preloaded logs threaded through (None is valid — helper
+            # returns empty response)
+            kwargs = mock_offline.call_args.kwargs
+            assert kwargs["preloaded_logs"] is None
+
+    def test_search_logs_dispatcher_routes_live_when_no_preload(self) -> None:
+        from src.agent import graph
+
+        state = {"preloaded_metrics": None, "preloaded_logs": None}
+        args = {"query": "error"}
+        mock_tool = MagicMock()
+        mock_tool.invoke.return_value = {"entries": []}
+        with patch("src.agent.tools.search_logs.search_logs", mock_tool):
+            graph._dispatch_search_logs(state, args)
+            mock_tool.invoke.assert_called_once_with(args)
+
+    def test_discover_causation_dispatcher_routes_offline_when_preloaded(self) -> None:
+        from src.agent import graph
+
+        state = {"preloaded_metrics": {"a": MagicMock(), "b": MagicMock()}, "preloaded_logs": None}
+        args = {"services": ["a", "b"], "time_range_minutes": 10}
+        with patch.object(graph.offline_data, "discover_causation_from_df") as mock_offline:
+            mock_offline.return_value = {
+                "causal_edges": [],
+                "root_cause": "a",
+                "root_cause_confidence": 0.0,
+                "counterfactual": "",
+                "graph_ascii": "",
+            }
+            graph._dispatch_discover_causation(state, args)
+            assert mock_offline.called
+
+    def test_discover_causation_dispatcher_routes_live_when_no_preload(self) -> None:
+        from src.agent import graph
+
+        state = {"preloaded_metrics": None, "preloaded_logs": None}
+        args = {"services": ["a", "b"], "time_range_minutes": 10}
+        mock_tool = MagicMock()
+        mock_tool.invoke.return_value = {
+            "causal_edges": [],
+            "root_cause": "a",
+            "root_cause_confidence": 0.0,
+            "counterfactual": "",
+            "graph_ascii": "",
+        }
+        with patch.object(graph, "discover_causation", mock_tool):
+            graph._dispatch_discover_causation(state, args)
+            mock_tool.invoke.assert_called_once_with(args)
+
+    def test_dispatchers_registry_covers_live_infra_tools(self) -> None:
+        """_DISPATCHERS_BY_NAME must cover every live-infra tool."""
+        from src.agent import graph
+
+        assert "query_metrics" in graph._DISPATCHERS_BY_NAME
+        assert "search_logs" in graph._DISPATCHERS_BY_NAME
+        assert "discover_causation" in graph._DISPATCHERS_BY_NAME
+        # Non-infra tools (get_topology, search_runbooks) are NOT in the
+        # dispatcher map — they're invoked via _TOOLS_BY_NAME directly.
+        assert "get_topology" not in graph._DISPATCHERS_BY_NAME
+        assert "search_runbooks" not in graph._DISPATCHERS_BY_NAME

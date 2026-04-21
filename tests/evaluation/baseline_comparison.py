@@ -262,16 +262,21 @@ class LLMWithoutToolsBaseline:
             # load_dotenv() at module level ensures GEMINI_API_KEY is loaded
             # from .env (same pattern as src/agent/graph.py).
             #
-            # max_retries=3 wraps the invoke() call in tenacity retry logic
+            # max_retries=6 wraps the invoke() call in tenacity retry logic
             # so transient network errors (macOS DNS cache blips, Gemini 429
             # rate limits, 5xx) don't cost a whole 35-test run a test.
-            # Matches src/agent/graph.py:_get_llm()'s max_retries=3 for
-            # consistency with the OpsAgent path.
+            # Matches src/agent/graph.py:_get_llm()'s max_retries=6 for
+            # consistency with the OpsAgent path. Bumped from =3 in
+            # Session 15 after RCAEval RE1-OB runs hit sustained 429
+            # RESOURCE_EXHAUSTED on gemini-3-flash-preview — 3 retries
+            # at 1+2+4=7s total wasn't enough to clear a per-minute rate-
+            # limit window. 6 retries at 1+2+4+8+16+32=63s gives enough
+            # tolerance for minute-bucket quota resets.
             llm = ChatGoogleGenerativeAI(
                 model=self.model_name,
                 temperature=0.1,
                 google_api_key=os.environ.get("GEMINI_API_KEY", ""),
-                max_retries=3,
+                max_retries=6,
             )
             response = llm.invoke(prompt)
             content = (

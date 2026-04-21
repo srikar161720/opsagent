@@ -201,11 +201,14 @@ class TestLLMWithoutToolsBaseline:
         assert result["confidence"] == 0.5  # default
 
     @patch("langchain_google_genai.ChatGoogleGenerativeAI")
-    def test_predict_wires_max_retries_3(self, mock_llm_cls: MagicMock) -> None:
-        """predict() must construct ChatGoogleGenerativeAI with max_retries=3
+    def test_predict_wires_max_retries_6(self, mock_llm_cls: MagicMock) -> None:
+        """predict() must construct ChatGoogleGenerativeAI with max_retries=6
         so transient network errors (macOS DNS cache blips, Gemini rate-limit
         429s, transient 5xx) don't silently abort a whole 35-test run. Matches
-        the max_retries setting on the OpsAgent path in src/agent/graph.py."""
+        the max_retries setting on the OpsAgent path in src/agent/graph.py.
+        Bumped from =3 in Session 15 — 3 retries at 1+2+4=7s total wasn't
+        enough to clear gemini-3-flash-preview's per-minute quota window;
+        6 retries at 1+2+4+8+16+32=63s total gives enough tolerance."""
         mock_llm_instance = MagicMock()
         mock_response = MagicMock()
         mock_response.content = "cartservice\ncartservice\nredis\n0.7"
@@ -216,11 +219,11 @@ class TestLLMWithoutToolsBaseline:
         baseline = LLMWithoutToolsBaseline(collector=collector)
         baseline.predict(SAMPLE_ALERT, services=["cartservice", "redis"])
 
-        # Verify max_retries=3 was passed to the constructor
+        # Verify max_retries=6 was passed to the constructor
         assert mock_llm_cls.called, "ChatGoogleGenerativeAI was not instantiated"
         call_kwargs = mock_llm_cls.call_args.kwargs
-        assert call_kwargs.get("max_retries") == 3, (
-            f"max_retries must be 3 (got {call_kwargs.get('max_retries')!r}). "
+        assert call_kwargs.get("max_retries") == 6, (
+            f"max_retries must be 6 (got {call_kwargs.get('max_retries')!r}). "
             f"Kept in sync with src/agent/graph.py:_get_llm()."
         )
 

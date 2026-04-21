@@ -97,6 +97,130 @@ class TestAgentExecutorInvestigate:
         )
         assert result["root_cause"] is not None
 
+    def test_investigate_threads_metrics_into_state(self, sample_agent_config: dict) -> None:
+        """preloaded_metrics / preloaded_logs kwargs reach the graph state."""
+        from src.agent.executor import AgentExecutor
+
+        with patch("src.agent.executor.build_graph") as mock_build:
+            mock_graph = MagicMock()
+            mock_graph.invoke.return_value = {
+                "root_cause": "cartservice",
+                "root_cause_confidence": 0.75,
+                "hypotheses": [],
+                "rca_report": "",
+                "recommended_actions": [],
+            }
+            mock_build.return_value = mock_graph
+            executor = AgentExecutor(sample_agent_config)
+
+        metrics = {"cartservice": MagicMock(), "frontend": MagicMock()}
+        logs = MagicMock()
+        executor.investigate(
+            alert={"title": "eval"},
+            metrics=metrics,
+            logs=logs,
+            anomaly_timestamp="2024-01-01T00:00:00Z",
+        )
+
+        # The state dict passed to graph.invoke should contain our
+        # preloaded data slots
+        call_args = mock_graph.invoke.call_args
+        state = call_args.args[0] if call_args.args else call_args.kwargs.get("state")
+        assert state["preloaded_metrics"] is metrics
+        assert state["preloaded_logs"] is logs
+
+    def test_investigate_live_mode_has_none_preloaded(self, sample_agent_config: dict) -> None:
+        """When metrics/logs kwargs are omitted, preloaded slots are None (live mode)."""
+        from src.agent.executor import AgentExecutor
+
+        with patch("src.agent.executor.build_graph") as mock_build:
+            mock_graph = MagicMock()
+            mock_graph.invoke.return_value = {
+                "root_cause": "cartservice",
+                "root_cause_confidence": 0.75,
+                "hypotheses": [],
+                "rca_report": "",
+                "recommended_actions": [],
+            }
+            mock_build.return_value = mock_graph
+            executor = AgentExecutor(sample_agent_config)
+
+        executor.investigate(alert={"title": "live incident"})
+
+        call_args = mock_graph.invoke.call_args
+        state = call_args.args[0] if call_args.args else call_args.kwargs.get("state")
+        assert state["preloaded_metrics"] is None
+        assert state["preloaded_logs"] is None
+
+    def test_investigate_live_mode_uses_live_system_prompt(
+        self, sample_agent_config: dict
+    ) -> None:
+        """No ``metrics`` kwarg → SYSTEM_PROMPT (with currencyservice
+        exclusion clause) is injected as the SystemMessage."""
+        from langchain_core.messages import SystemMessage
+
+        from src.agent.executor import AgentExecutor
+
+        with patch("src.agent.executor.build_graph") as mock_build:
+            mock_graph = MagicMock()
+            mock_graph.invoke.return_value = {
+                "root_cause": "cartservice",
+                "root_cause_confidence": 0.75,
+                "hypotheses": [],
+                "rca_report": "",
+                "recommended_actions": [],
+            }
+            mock_build.return_value = mock_graph
+            executor = AgentExecutor(sample_agent_config)
+
+        executor.investigate(alert={"title": "live incident"})
+
+        call_args = mock_graph.invoke.call_args
+        state = call_args.args[0] if call_args.args else call_args.kwargs.get("state")
+        system_msg = next(m for m in state["messages"] if isinstance(m, SystemMessage))
+        # Live mode MUST contain the currencyservice exclusion clause to
+        # preserve Session 13's 100% Recall@1 on OTel Demo.
+        assert "currencyservice is BROKEN IN BASELINE" in system_msg.content
+
+    def test_investigate_offline_mode_uses_offline_system_prompt(
+        self, sample_agent_config: dict
+    ) -> None:
+        """``metrics`` kwarg provided → SYSTEM_PROMPT_OFFLINE (without
+        currencyservice exclusion clause) is injected. RCAEval-OB cases
+        have currencyservice as a legitimate fault target."""
+        import pandas as pd
+        from langchain_core.messages import SystemMessage
+
+        from src.agent.executor import AgentExecutor
+
+        with patch("src.agent.executor.build_graph") as mock_build:
+            mock_graph = MagicMock()
+            mock_graph.invoke.return_value = {
+                "root_cause": "currencyservice",
+                "root_cause_confidence": 0.5,
+                "hypotheses": [],
+                "rca_report": "",
+                "recommended_actions": [],
+            }
+            mock_build.return_value = mock_graph
+            executor = AgentExecutor(sample_agent_config)
+
+        executor.investigate(
+            alert={"title": "RCAEval currencyservice_cpu"},
+            metrics={"currencyservice": pd.DataFrame({"cpu_usage": [0.1, 0.2]})},
+            anomaly_timestamp="2024-01-01T00:00:00Z",
+        )
+
+        call_args = mock_graph.invoke.call_args
+        state = call_args.args[0] if call_args.args else call_args.kwargs.get("state")
+        system_msg = next(m for m in state["messages"] if isinstance(m, SystemMessage))
+        # Offline mode MUST NOT contain the clause — that was what caused
+        # 0/25 Recall@1 on RCAEval-OB currencyservice cases.
+        assert "currencyservice is BROKEN IN BASELINE" not in system_msg.content
+        assert "never pick it as root cause" not in system_msg.content
+        # But the rest of the prompt must be intact
+        assert "OpsAgent, an expert Site Reliability Engineer" in system_msg.content
+
     def test_investigate_graph_failure(self, sample_agent_config: dict, sample_alert: dict) -> None:
         from src.agent.executor import AgentExecutor
 
@@ -137,6 +261,42 @@ class TestFormatAlert:
 
         msg = executor._format_alert({}, [], None)
         assert "unknown" in msg
+
+    def test_format_alert_includes_scope_directive(self, sample_agent_config: dict) -> None:
+        """When affected_services is non-empty, the alert must include the
+        IMPORTANT scope directive pinning hypotheses to that list.
+
+        This anti-bias directive is what makes RCAEval-OB cases solvable
+        for OpsAgent after the vocabulary expansion — without it, the LLM
+        still anchors on the system-prompt's OTel Demo examples and rarely
+        proposes adservice / emailservice / recommendationservice.
+        """
+        from src.agent.executor import AgentExecutor
+
+        with patch("src.agent.executor.build_graph"):
+            executor = AgentExecutor(sample_agent_config)
+
+        msg = executor._format_alert(
+            {"anomaly_score": 1.0},
+            ["adservice", "cartservice", "checkoutservice"],
+            "2024-01-01T00:00:00Z",
+        )
+        assert "IMPORTANT" in msg
+        assert "Scope your investigation" in msg
+        assert "Do NOT propose" in msg
+        assert "adservice" in msg
+
+    def test_format_alert_omits_scope_directive_when_no_services(
+        self, sample_agent_config: dict
+    ) -> None:
+        """No scope directive when affected_services is empty (rare live case)."""
+        from src.agent.executor import AgentExecutor
+
+        with patch("src.agent.executor.build_graph"):
+            executor = AgentExecutor(sample_agent_config)
+
+        msg = executor._format_alert({}, [], None)
+        assert "Scope your investigation" not in msg
 
 
 class TestExtractTop3:

@@ -112,8 +112,7 @@ def _build_investigator(baseline_kind: str | None) -> Any:
         return BaselineInvestigatorAdapter(LLMWithoutToolsBaseline(), kind="llm-no-tools")
 
     raise ValueError(
-        f"Unknown baseline '{baseline_kind}'. "
-        f"Valid choices: {', '.join(_VALID_BASELINES)}."
+        f"Unknown baseline '{baseline_kind}'. Valid choices: {', '.join(_VALID_BASELINES)}."
     )
 
 
@@ -329,8 +328,7 @@ def main() -> None:
         if args.fault not in FAULT_SCRIPTS:
             known = ", ".join(sorted(FAULT_SCRIPTS.keys()))
             print(
-                f"Error: '{args.fault}' is not a registered fault type. "
-                f"Known fault types: {known}",
+                f"Error: '{args.fault}' is not a registered fault type. Known fault types: {known}",
                 file=sys.stderr,
             )
             sys.exit(1)

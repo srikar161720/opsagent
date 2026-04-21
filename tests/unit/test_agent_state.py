@@ -23,6 +23,11 @@ class TestAgentState:
             "anomaly_window",
             "affected_services",
             "start_time",
+            # Offline-mode fields threaded in by AgentExecutor.investigate
+            # when metrics=/logs= kwargs are provided. Default None for
+            # live-mode invocations.
+            "preloaded_metrics",
+            "preloaded_logs",
             "messages",
             "hypotheses",
             "evidence",
@@ -52,6 +57,8 @@ class TestAgentState:
             "anomaly_window": ("2024-01-01", "2024-01-01"),
             "affected_services": ["svc_a"],
             "start_time": None,
+            "preloaded_metrics": None,
+            "preloaded_logs": None,
             "messages": [],
             "hypotheses": [],
             "evidence": [],
@@ -65,6 +72,8 @@ class TestAgentState:
         }
         assert state["tool_calls_remaining"] == 10
         assert state["root_cause"] is None
+        assert state["preloaded_metrics"] is None
+        assert state["preloaded_logs"] is None
 
     def test_state_field_types(self) -> None:
         from src.agent.state import AgentState

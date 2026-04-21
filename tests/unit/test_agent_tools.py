@@ -21,19 +21,25 @@ class TestGetTopology:
     """Tests for the get_topology agent tool."""
 
     def test_full_topology_returns_all_nodes(self) -> None:
+        """Full OB topology: 11 nodes (reduced 7 + OB-only 4)."""
         from src.agent.tools.get_topology import get_topology
 
         result = get_topology.invoke({"service_name": None})
         node_names = [n["name"] for n in result["nodes"]]
-        assert len(node_names) == 7
+        assert len(node_names) == 11
         assert "redis" in node_names
         assert "frontend" in node_names
+        assert "adservice" in node_names
+        assert "emailservice" in node_names
+        assert "recommendationservice" in node_names
+        assert "shippingservice" in node_names
 
     def test_full_topology_returns_all_edges(self) -> None:
+        """9 reduced OTel Demo edges + 5 OB extension edges."""
         from src.agent.tools.get_topology import get_topology
 
         result = get_topology.invoke({"service_name": None})
-        assert len(result["edges"]) == 9
+        assert len(result["edges"]) == 14
 
     def test_subgraph_cartservice(self) -> None:
         from src.agent.tools.get_topology import get_topology
