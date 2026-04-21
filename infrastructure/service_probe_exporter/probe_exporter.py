@@ -76,9 +76,9 @@ def _probe_service(host: str, port: int) -> tuple[bool, float]:
                 try:
                     resp = sock.recv(64)
                     is_up = True  # got any response (even RST/error)
-                except socket.timeout:
+                except TimeoutError:
                     is_up = False  # no response = paused/frozen
-        except socket.timeout:
+        except TimeoutError:
             is_up = False  # read timed out = paused/frozen
         except OSError:
             is_up = True  # connection reset = service is alive but rejected our probe
@@ -86,7 +86,7 @@ def _probe_service(host: str, port: int) -> tuple[bool, float]:
         sock.close()
         duration = time.monotonic() - start
         return is_up, duration
-    except (OSError, socket.timeout):
+    except (TimeoutError, OSError):
         duration = time.monotonic() - start
         return False, duration
 
