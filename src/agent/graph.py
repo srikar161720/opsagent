@@ -18,6 +18,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, START, StateGraph
 
+from src.agent import offline_data
 from src.agent.prompts.report_template import RCA_REPORT_TEMPLATE
 from src.agent.state import AgentState
 from src.agent.tools import TOOLS
@@ -32,16 +33,188 @@ load_dotenv()
 _TOOLS_BY_NAME = {t.name: t for t in TOOLS}
 
 
-def _get_llm() -> ChatGoogleGenerativeAI:
-    """Create the LLM instance with tools bound."""
+# ── Tool dispatchers ─────────────────────────────────────────────────────
+#
+# Every tool call that touches live Prometheus/Loki goes through one of
+# these dispatchers. When ``state["preloaded_metrics"]`` (or
+# ``state["preloaded_logs"]``) is set, the dispatcher routes to the
+# corresponding offline helper in ``src.agent.offline_data`` instead of
+# invoking the live tool. When both slots are ``None`` — the live-mode
+# default for ``AgentExecutor.investigate(alert=...)`` — the dispatcher
+# is a pure passthrough to the live tool, preserving bit-for-bit behavior
+# of the OTel Demo fault-injection path (Session 13's 100% Recall@1).
+
+
+def _dispatch_query_metrics(state: AgentState, args: dict[str, Any]) -> dict[str, Any]:
+    """Route ``query_metrics`` to offline or live implementation.
+
+    When ``state["preloaded_metrics"]`` is truthy, reads from preloaded
+    DataFrames via :func:`offline_data.query_preloaded_metrics`.
+    Otherwise delegates to the live tool at
+    ``src.agent.tools.query_metrics.query_metrics.invoke(...)``.
+    """
+    preloaded = state.get("preloaded_metrics")
+    if preloaded:
+        kwargs = {
+            "service_name": args.get("service_name", ""),
+            "metric_name": args.get("metric_name", ""),
+            "time_range_minutes": args.get("time_range_minutes", 30),
+            "start_time": args.get("start_time"),
+            "preloaded_metrics": preloaded,
+        }
+        return offline_data.query_preloaded_metrics(**kwargs)
+
+    from src.agent.tools.query_metrics import query_metrics
+
+    result: dict[str, Any] = query_metrics.invoke(args)
+    return result
+
+
+def _dispatch_search_logs(state: AgentState, args: dict[str, Any]) -> dict[str, Any]:
+    """Route ``search_logs`` to offline or live implementation.
+
+    Offline mode is triggered by ``state["preloaded_metrics"]`` — logs
+    may be ``None`` even when metrics are preloaded (RE1 has no logs),
+    in which case the offline helper returns an empty log response
+    gracefully.
+    """
+    if state.get("preloaded_metrics"):
+        kwargs = {
+            "query": args.get("query", ""),
+            "service_filter": args.get("service_filter"),
+            "time_range_minutes": args.get("time_range_minutes", 30),
+            "limit": args.get("limit", 100),
+            "start_time": args.get("start_time"),
+            "preloaded_logs": state.get("preloaded_logs"),
+        }
+        return offline_data.search_preloaded_logs(**kwargs)
+
+    from src.agent.tools.search_logs import search_logs
+
+    result: dict[str, Any] = search_logs.invoke(args)
+    return result
+
+
+def _dispatch_discover_causation(state: AgentState, args: dict[str, Any]) -> dict[str, Any]:
+    """Route ``discover_causation`` to offline or live implementation.
+
+    Offline mode uses preloaded per-service DataFrames to build the
+    column matrix, then delegates to the shared
+    :func:`src.agent.tools.discover_causation._run_pc_from_columns`
+    helper so the PC + counterfactual logic is identical to the live path.
+    """
+    preloaded = state.get("preloaded_metrics")
+    if preloaded:
+        kwargs = {
+            "services": args.get("services", []),
+            "time_range_minutes": args.get("time_range_minutes", 30),
+            "start_time": args.get("start_time"),
+            "critical_services": args.get("critical_services"),
+            "preloaded_metrics": preloaded,
+        }
+        return offline_data.discover_causation_from_df(**kwargs)
+
+    result: dict[str, Any] = discover_causation.invoke(args)
+    return result
+
+
+# Map tool names to dispatchers for the LLM-driven ``_TOOLS_BY_NAME``
+# lookup path in ``gather_evidence_node``. Tools not in this dict (e.g.
+# ``get_topology``, ``search_runbooks``) don't touch live infra and are
+# invoked directly via ``_TOOLS_BY_NAME`` as before.
+_DISPATCHERS_BY_NAME = {
+    "query_metrics": _dispatch_query_metrics,
+    "search_logs": _dispatch_search_logs,
+    "discover_causation": _dispatch_discover_causation,
+}
+
+
+_LIVE_MODEL = "gemini-3-flash-preview"
+_OFFLINE_MODEL = "gemini-2.5-flash"
+
+
+def _get_llm_live() -> ChatGoogleGenerativeAI:
+    """Live-mode LLM factory — Gemini 3 Flash Preview.
+
+    Used for OTel Demo fault-injection investigations. Session 13's
+    100% Recall@1 at 0.75 confidence depends on this model's
+    reasoning capacity — the swap from gemini-2.5-flash-lite in
+    Session 12 was specifically driven by Gemini 3's better CRITICAL-
+    override reasoning. Live fault-injection runs don't saturate the
+    preview-model quota because fault_injection_suite cooldowns
+    (120-300s between tests) keep sustained call rates low.
+
+    ``max_retries=6`` (Session 15 bump from =3) gives ~63s of tenacity
+    backoff per LLM call, enough to clear a per-minute rate-limit
+    window.
+    """
     api_key = os.environ.get("GEMINI_API_KEY", "")
     return ChatGoogleGenerativeAI(
-        model="gemini-3-flash-preview",
+        model=_LIVE_MODEL,
         temperature=0.1,
         max_output_tokens=4096,
         google_api_key=api_key,
-        max_retries=3,
+        max_retries=6,
     )
+
+
+def _get_llm_offline() -> ChatGoogleGenerativeAI:
+    """Offline-mode LLM factory — Gemini 2.5 Flash (production).
+
+    Used for RCAEval offline evaluation (125+91+30 = 246 OB cases,
+    each making 3-5 LLM calls). The preview model Gemini 3 Flash
+    Preview has tight burst / per-minute caps that trigger 429
+    RESOURCE_EXHAUSTED even after resetting the daily quota at
+    midnight PT — they're architectural limits on preview-model
+    access, not solvable by waiting. Gemini 2.5 Flash is a
+    production model with RPM/RPD in ranges that easily accommodate
+    back-to-back RCAEval runs.
+
+    Trade-off: Gemini 2.5 Flash has slightly weaker reasoning than
+    Gemini 3 Flash Preview (Session 11's OTel Demo run on
+    gemini-2.5-flash-lite scored 27.5% Recall@1 vs Session 13's
+    100% on Gemini 3). For RCAEval this trade-off is acceptable
+    because OpsAgent's RCAEval performance is already bottlenecked
+    by topology-bias limitations (vocab-unfamiliar services, no
+    probe/memory CRITICAL signals from offline CSVs), not by LLM
+    reasoning depth.
+
+    ``max_retries=6`` matches the live factory for consistency.
+    """
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    return ChatGoogleGenerativeAI(
+        model=_OFFLINE_MODEL,
+        temperature=0.1,
+        max_output_tokens=4096,
+        google_api_key=api_key,
+        max_retries=6,
+    )
+
+
+def _get_llm() -> ChatGoogleGenerativeAI:
+    """Backward-compatible alias for :func:`_get_llm_live`.
+
+    Kept so existing tests / callers that don't know about the
+    live/offline split continue to work. New call sites should use
+    :func:`_get_llm_for_state` which picks the right factory based
+    on whether ``preloaded_metrics`` is in the agent state.
+    """
+    return _get_llm_live()
+
+
+def _get_llm_for_state(state: AgentState) -> ChatGoogleGenerativeAI:
+    """Pick the right LLM factory based on investigation mode.
+
+    Mirrors the :data:`SYSTEM_PROMPT` / :data:`SYSTEM_PROMPT_OFFLINE`
+    split: when ``state["preloaded_metrics"]`` is truthy, the graph
+    is running against RCAEval preloaded DataFrames and should use
+    the offline (production) LLM to avoid preview-model rate-limit
+    issues. Otherwise (live OTel Demo), use the preview LLM whose
+    reasoning capacity drives Session 13's 100% Recall@1.
+    """
+    if state.get("preloaded_metrics"):
+        return _get_llm_offline()
+    return _get_llm_live()
 
 
 def _extract_text(response: Any) -> str:
@@ -109,9 +282,6 @@ def sweep_probes_node(state: AgentState) -> dict[str, Any]:
     2. Summarised in the AIMessage emitted by this node so the LLM sees
        the same picture when forming hypotheses.
     """
-    from src.agent.tools.query_metrics import query_metrics
-    from src.agent.tools.search_logs import search_logs
-
     affected = state.get("affected_services", [])
     pinned_start = state.get("start_time")
     window_start = state.get("anomaly_window", ("", ""))[0]
@@ -141,7 +311,7 @@ def sweep_probes_node(state: AgentState) -> dict[str, Any]:
             if pinned_start:
                 qm_args["start_time"] = pinned_start
             try:
-                result = query_metrics.invoke(qm_args)
+                result = _dispatch_query_metrics(state, qm_args)
             except Exception as exc:
                 logger.warning("Sweep %s failed for %s: %s", metric, svc, exc)
                 continue
@@ -185,7 +355,7 @@ def sweep_probes_node(state: AgentState) -> dict[str, Any]:
         if pinned_start:
             log_args["start_time"] = pinned_start
         try:
-            log_result = search_logs.invoke(log_args)
+            log_result = _dispatch_search_logs(state, log_args)
         except Exception as exc:
             logger.warning("Sweep crash-log failed for %s: %s", svc, exc)
             continue
@@ -295,10 +465,11 @@ def analyze_context_node(state: AgentState) -> dict[str, Any]:
 
 def form_hypothesis_node(state: AgentState) -> dict[str, Any]:
     """Use the LLM to reason about topology and evidence to form hypotheses."""
-    llm = _get_llm()
+    llm = _get_llm_for_state(state)
 
     existing_evidence = state.get("evidence", [])
     causal = state.get("causal_graph")
+    affected = state.get("affected_services", [])
 
     prompt = (
         "Based on the alert context, service topology, and any evidence "
@@ -308,6 +479,16 @@ def form_hypothesis_node(state: AgentState) -> dict[str, Any]:
         prompt += f"Evidence collected so far:\n{json.dumps(existing_evidence, indent=2)}\n\n"
     if causal:
         prompt += f"Causal analysis results:\n{json.dumps(causal, indent=2)}\n\n"
+
+    # Repeat the scope directive at the hypothesis step — the LLM's
+    # priors from OTel-Demo-specific training data can override the
+    # alert-level directive if the affected_services list is unfamiliar.
+    if affected:
+        prompt += (
+            f"**Scope reminder — your hypotheses MUST be drawn from the "
+            f"Affected services list: {', '.join(affected)}. Do NOT propose "
+            f"a service outside this list.**\n\n"
+        )
 
     prompt += (
         "Provide your ranked hypotheses as a JSON list with format:\n"
@@ -323,6 +504,22 @@ def form_hypothesis_node(state: AgentState) -> dict[str, Any]:
     content = _extract_text(response)
     hypotheses = _parse_hypotheses(content, state.get("hypotheses", []))
 
+    # Post-LLM scope enforcement: drop hypotheses naming services outside
+    # affected_services. Without this, Gemini 3's OTel-Demo priors leak
+    # shippingservice / recommendationservice / etc. into RCAEval runs
+    # even with explicit scope directives in the prompt. Also safe on
+    # live OTel Demo: fault_injection_suite.py already excludes
+    # currencyservice from affected_services, which is the established
+    # Session 12+ convention.
+    if affected:
+        affected_set = set(affected)
+        filtered = [h for h in hypotheses if h.get("service", "") in affected_set]
+        if filtered:
+            hypotheses = filtered
+        # If the filter would empty the list entirely, keep the original
+        # hypotheses so downstream nodes still have signal to work with —
+        # top_3 extraction will fall back to causal-graph services.
+
     return {
         "messages": [response],
         "hypotheses": hypotheses,
@@ -335,7 +532,7 @@ def gather_evidence_node(state: AgentState) -> dict[str, Any]:
     The LLM decides which tools to call.  We execute tool calls manually
     to track the tool call budget.
     """
-    llm = _get_llm()
+    llm = _get_llm_for_state(state)
     llm_with_tools = llm.bind_tools([t for t in TOOLS if t.name != "discover_causation"])
     remaining = state.get("tool_calls_remaining", 0)
     pinned_start = state.get("start_time")
@@ -382,15 +579,27 @@ def gather_evidence_node(state: AgentState) -> dict[str, Any]:
                 "discover_causation",
             }:
                 tool_args.setdefault("start_time", pinned_start)
-            tool_fn = _TOOLS_BY_NAME.get(tool_name)
 
-            if tool_fn is None:
-                tool_result = f"Unknown tool: {tool_name}"
-            else:
+            # Route live-infra tools through dispatchers so offline mode
+            # reads from preloaded DataFrames instead of hitting Prometheus
+            # / Loki. Non-infra tools (get_topology, search_runbooks) stay
+            # on the direct ``_TOOLS_BY_NAME`` path.
+            tool_result: dict[str, Any] | str
+            dispatcher = _DISPATCHERS_BY_NAME.get(tool_name)
+            if dispatcher is not None:
                 try:
-                    tool_result = tool_fn.invoke(tool_args)
+                    tool_result = dispatcher(state, tool_args)
                 except Exception as exc:
                     tool_result = f"Tool error: {exc}"
+            else:
+                tool_fn = _TOOLS_BY_NAME.get(tool_name)
+                if tool_fn is None:
+                    tool_result = f"Unknown tool: {tool_name}"
+                else:
+                    try:
+                        tool_result = tool_fn.invoke(tool_args)
+                    except Exception as exc:
+                        tool_result = f"Tool error: {exc}"
 
             result_str = (
                 json.dumps(tool_result, default=str)
@@ -424,8 +633,6 @@ def gather_evidence_node(state: AgentState) -> dict[str, Any]:
     if not logs_searched and budget_left > 1 and hypotheses:
         top_svc = hypotheses[0].get("service", "")
         if top_svc:
-            from src.agent.tools.search_logs import search_logs
-
             log_args: dict[str, Any] = {
                 "query": "error OR crash OR timeout OR refused OR panic OR fatal",
                 "service_filter": top_svc,
@@ -435,7 +642,7 @@ def gather_evidence_node(state: AgentState) -> dict[str, Any]:
             if pinned_start:
                 log_args["start_time"] = pinned_start
             try:
-                log_result = search_logs.invoke(log_args)
+                log_result = _dispatch_search_logs(state, log_args)
                 log_str = json.dumps(log_result, default=str)
                 new_messages.append(
                     AIMessage(content=f"[Auto] Log search for {top_svc}:\n{log_str[:500]}")
@@ -538,7 +745,7 @@ def analyze_causation_node(state: AgentState) -> dict[str, Any]:
         # Use a 10-minute window to maximize the anomaly-to-baseline ratio.
         # With a 60s pre-investigation wait, ~4 of the 40 data points (15s step)
         # will contain the fault signal — much stronger than 4/120 with 30 min.
-        causal_result = discover_causation.invoke(causal_args)
+        causal_result = _dispatch_discover_causation(state, causal_args)
     except Exception as exc:
         logger.exception("Causal discovery failed")
         causal_result = {
@@ -760,7 +967,7 @@ def generate_report_node(state: AgentState) -> dict[str, Any]:
     keyed by sentinel name. This eliminates the bug where the LLM would
     leave literal ``{causal_graph_ascii}`` in its output.
     """
-    llm = _get_llm()
+    llm = _get_llm_for_state(state)
 
     alert = state.get("alert", {})
     causal = state.get("causal_graph", {}) or {}
@@ -951,8 +1158,15 @@ def _parse_hypotheses(content: str, existing: list[dict]) -> list[dict]:
             pass
 
     # Tier 3: Regex fallback — extract service names from patterns like
-    # "service": "cartservice" or **cartservice** is the root cause
+    # "service": "cartservice" or **cartservice** is the root cause.
+    # Includes the full OTel Astronomy Shop / Online Boutique vocabulary
+    # so RCAEval-OB runs can attribute faults to adservice / emailservice
+    # / recommendationservice. Extra services are harmless on live OTel
+    # Demo: ``query_metrics`` returns neutral responses for services that
+    # aren't scraping, so mentioning them cannot trigger a CRITICAL
+    # override.
     known_services = {
+        # Reduced OTel Demo (running on the local stack)
         "cartservice",
         "checkoutservice",
         "currencyservice",
@@ -960,6 +1174,11 @@ def _parse_hypotheses(content: str, existing: list[dict]) -> list[dict]:
         "paymentservice",
         "productcatalogservice",
         "redis",
+        # Full OB extension (RCAEval ground-truth services only)
+        "adservice",
+        "emailservice",
+        "recommendationservice",
+        "shippingservice",
     }
     found: list[str] = []
     for svc in known_services:

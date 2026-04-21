@@ -14,7 +14,7 @@ import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.agent.graph import build_graph
-from src.agent.prompts.system_prompt import SYSTEM_PROMPT
+from src.agent.prompts.system_prompt import SYSTEM_PROMPT, SYSTEM_PROMPT_OFFLINE
 
 logger = logging.getLogger(__name__)
 
@@ -87,13 +87,32 @@ class AgentExecutor:
         investigation = agent_config.get("investigation", {})
         max_tool_calls = investigation.get("max_tool_calls", 10)
 
+        # Select the system-prompt variant based on mode. The default
+        # ``SYSTEM_PROMPT`` includes the Session-12 "currencyservice is
+        # BROKEN IN BASELINE — never pick it as root cause" clause, which
+        # is correct on the live OTel Demo (v1.10.0 SIGSEGV crash-loop
+        # creates permanent probe_up=0 baseline noise). On RCAEval
+        # offline runs there is no live image — the CSVs are pre-recorded
+        # — so the clause is harmful: it caused 0/25 Recall@1 on
+        # RE1-OB currencyservice cases in an earlier Session-15 run by
+        # explicitly forbidding the LLM from naming the correct service.
+        # ``SYSTEM_PROMPT_OFFLINE`` is identical but without the clause.
+        system_prompt = SYSTEM_PROMPT_OFFLINE if metrics is not None else SYSTEM_PROMPT
+
         initial_state: dict[str, Any] = {
             "alert": alert,
             "anomaly_window": (ts, ts),
             "affected_services": affected_services,
             "start_time": start_time,
+            # Offline mode: passing ``metrics=`` and ``logs=`` to
+            # ``investigate()`` threads the preloaded DataFrames into state
+            # so the graph's tool dispatchers can read from them instead of
+            # hitting live Prometheus/Loki. ``None`` in both slots keeps
+            # the live-mode path unchanged.
+            "preloaded_metrics": metrics,
+            "preloaded_logs": logs,
             "messages": [
-                SystemMessage(content=SYSTEM_PROMPT),
+                SystemMessage(content=system_prompt),
                 HumanMessage(content=self._format_alert(alert, affected_services, ts)),
             ],
             "hypotheses": [],
@@ -130,16 +149,37 @@ class AgentExecutor:
         affected_services: list[str],
         timestamp: str | None,
     ) -> str:
-        """Format the alert payload into a readable initial message."""
+        """Format the alert payload into a readable initial message.
+
+        The scope directive at the end is the highest-leverage anti-bias
+        mitigation the agent has. Without it, the LLM tends to anchor on
+        the services in the system-prompt examples (cartservice, frontend,
+        redis, …) even when the actual incident involves a service that
+        only exists in the pinned `affected_services` list — e.g. an
+        RCAEval-OB `adservice_cpu` case whose metric DataFrame contains
+        ``adservice`` but whose example fingerprints are OTel-Demo-centric.
+        The directive makes the scoping explicit at the natural-language
+        level, which the LLM respects far more reliably than vocabulary
+        inference.
+        """
         services = ", ".join(affected_services) if affected_services else "unknown"
         anomaly_score = alert.get("anomaly_score", "N/A")
+        scope_directive = ""
+        if affected_services:
+            scope_directive = (
+                f"\n\n**IMPORTANT — Scope your investigation strictly to the "
+                f"Affected services listed above.** Your root-cause hypotheses "
+                f"MUST name one of: {services}. Do NOT propose a service that "
+                f"is not in this list, even if you recall it from previous "
+                f"investigations or system-prompt examples."
+            )
         return (
             f"INCIDENT ALERT\n"
             f"Timestamp: {timestamp}\n"
             f"Affected services: {services}\n"
             f"Anomaly score: {anomaly_score}\n"
             f"Alert details: {alert}\n\n"
-            f"Please investigate and identify the root cause."
+            f"Please investigate and identify the root cause.{scope_directive}"
         )
 
     def _extract_top3(self, state: dict[str, Any]) -> list[str]:
@@ -157,22 +197,35 @@ class AgentExecutor:
         if root and root not in ("unknown", "inconclusive") and root not in result:
             result.insert(0, root)
 
-        # Fallback: pad from causal graph edges if still short
+        # Fallback: pad from causal graph edges if still short.
+        # Includes full OB vocabulary so RCAEval-OB runs can surface
+        # adservice / emailservice / recommendationservice in top_3.
+        # The list is ordered longest-first so e.g. "productcatalogservice_cpu"
+        # matches "productcatalogservice", not a shorter prefix.
         if len(result) < 3:
             causal = state.get("causal_graph") or {}
+            known_services = sorted(
+                (
+                    "cartservice",
+                    "checkoutservice",
+                    "currencyservice",
+                    "frontend",
+                    "paymentservice",
+                    "productcatalogservice",
+                    "redis",
+                    "adservice",
+                    "emailservice",
+                    "recommendationservice",
+                    "shippingservice",
+                ),
+                key=len,
+                reverse=True,
+            )
             for edge in causal.get("causal_edges", []):
                 for key in ("source", "target"):
                     svc = edge.get(key, "")
                     # Strip metric suffix (e.g., "redis_cpu" → "redis")
-                    for known in (
-                        "cartservice",
-                        "checkoutservice",
-                        "currencyservice",
-                        "frontend",
-                        "paymentservice",
-                        "productcatalogservice",
-                        "redis",
-                    ):
+                    for known in known_services:
                         if svc.startswith(known) and known not in result:
                             result.append(known)
                             break

@@ -139,208 +139,236 @@ def discover_causation(
             for metric_name, values in svc_data.items():
                 columns[f"{service}_{metric_name}"] = values
 
-        # Align all columns to the shortest length.
-        # Soft gate: allow partial data. Previously required ALL columns >= 10
-        # points, which bailed whenever any metric was briefly unavailable.
-        # New rule: min_len >= 6 AND at most 30% of columns are "short" (<6).
-        if not columns:
-            return _inconclusive("No metric data returned from Prometheus.")
-
-        lengths = [len(v) for v in columns.values()]
-        min_len = min(lengths)
-        short_count = sum(1 for length in lengths if length < 6)
-        short_frac = short_count / len(lengths)
-        if min_len < 6 or short_frac > 0.30:
-            return _inconclusive(
-                f"Insufficient data points (min={min_len}, "
-                f"{short_count}/{len(lengths)} columns are short). "
-                f"Need min>=6 and <=30% short columns."
-            )
-
-        # Truncate all columns to the shortest usable length so the DataFrame
-        # is rectangular. Use min_len — not a "compromise" value — to keep the
-        # alignment exact.
-        metrics_df = pd.DataFrame({k: v[:min_len] for k, v in columns.items()})
-
-        # Drop zero-variance columns before causal discovery.
-        # network_rx/tx_errors_rate are zero during normal operation, and
-        # crashed services return constant (all-zero) metrics. These cause
-        # a singular correlation matrix in Fisher's Z test.
-        variance = metrics_df.var()
-        zero_var_cols = variance[variance < 1e-12].index.tolist()
-        if zero_var_cols:
-            logger.info(
-                "Dropping %d zero-variance columns: %s",
-                len(zero_var_cols),
-                zero_var_cols[:5],
-            )
-            metrics_df = metrics_df.drop(columns=zero_var_cols)
-
-        if metrics_df.shape[1] < 2:
-            return _inconclusive("Fewer than 2 non-constant metric columns after filtering.")
-
-        # 2. Create time-lagged features
-        # Use lags=[1, 2] instead of [1, 2, 5] to reduce column count.
-        lagged_df = create_time_lags(metrics_df, lags=[1, 2])
-        # Lowered from 10 to 8 to match the softer input gate above.
-        if len(lagged_df) < 8:
-            return _inconclusive("Too few rows after time-lag creation.")
-
-        # Drop zero-variance lagged columns
-        lag_var = lagged_df.var()
-        zero_var_lagged = lag_var[lag_var < 1e-12].index.tolist()
-        if zero_var_lagged:
-            lagged_df = lagged_df.drop(columns=zero_var_lagged)
-
-        # Drop perfectly correlated columns (r > 0.999).
-        # Lagged copies of slow-changing metrics (e.g. memory) are nearly
-        # identical, making the correlation matrix singular even though no
-        # single column is zero-variance.
-        lagged_df = _drop_correlated_columns(lagged_df, threshold=0.999)
-
-        if lagged_df.shape[1] < 2:
-            return _inconclusive("Fewer than 2 independent columns after correlation filtering.")
-
-        # Add tiny jitter as a safety net against remaining near-singularities
-        rng = np.random.default_rng(42)
-        lagged_df = lagged_df + rng.normal(0, 1e-8, lagged_df.shape)
-
-        # 3. Run PC algorithm (depth capped at 3 to avoid combinatorial
-        #    explosion with many columns)
-        cg = discover_causal_graph(lagged_df, alpha=0.05, max_conditioning_set=3)
-
-        # 4. Parse directed edges
-        edges = parse_causal_graph(cg, list(lagged_df.columns))
-        # Note: if edges is empty AND no critical_services are provided, we
-        # bail out later. If critical_services ARE provided, we proceed with
-        # synthesized edges even when PC found nothing.
-        if not edges and not critical_set:
-            return _inconclusive("No directed causal edges discovered.")
-
-        # 5. Compute baseline stats (first 60% of data)
-        baseline_end = int(len(metrics_df) * 0.6)
-        baseline_df = metrics_df.iloc[:baseline_end]
-        baseline_stats = compute_baseline_stats(baseline_df)
-
-        # 6. Counterfactual scoring for edges between original (non-lagged) columns
-        anomaly_window = (baseline_end, len(metrics_df) - 1)
-        scored_edges: list[CausalEdge] = []
-        best_explanation = ""
-        best_confidence = 0.0
-
-        for edge in edges:
-            # Extract base service names (strip _lag suffixes)
-            src_base = _strip_lag(edge.source)
-            tgt_base = _strip_lag(edge.target)
-
-            if src_base in metrics_df.columns and tgt_base in metrics_df.columns:
-                conf, explanation = calculate_counterfactual_confidence(
-                    metrics_df, src_base, tgt_base, anomaly_window, baseline_stats
-                )
-                scored_edges.append(
-                    CausalEdge(
-                        source=edge.source,
-                        target=edge.target,
-                        confidence=conf,
-                        lag=edge.lag,
-                        evidence=explanation,
-                    )
-                )
-                if conf > best_confidence:
-                    best_confidence = conf
-                    best_explanation = explanation
-            else:
-                scored_edges.append(edge)
-
-        # 7. Identify root cause: highest-confidence source with no incoming edges
-        sources = {e.source for e in scored_edges}
-        targets = {e.target for e in scored_edges}
-        root_candidates = sources - targets
-        if root_candidates:
-            root_cause = max(
-                root_candidates,
-                key=lambda s: max(
-                    (e.confidence for e in scored_edges if e.source == s), default=0.0
-                ),
-            )
-        elif scored_edges:
-            top = max(scored_edges, key=lambda e: e.confidence)
-            root_cause = top.source
-        else:
-            root_cause = "unknown"
-
-        # Extract service name from metric column name (e.g. "cartservice_cpu" → "cartservice")
-        root_service = _extract_service(root_cause, services)
-
-        # 7b. CRITICAL-service priors: synthesize high-confidence edges from
-        # each critical (DOWN) service to each surviving service. Downstream
-        # targets are derived from PC edges when available, otherwise from
-        # the non-critical service list (so synthesis still runs when PC is
-        # inconclusive). Override root_cause to a critical service.
-        if critical_set:
-            downstream_services: set[str] = set()
-            if scored_edges:
-                downstream_services = {
-                    _extract_service(e.target, services) for e in scored_edges
-                }
-                downstream_services.update(
-                    {_extract_service(e.source, services) for e in scored_edges}
-                )
-            # Fall back to the non-critical service list if PC gave us nothing.
-            if not downstream_services:
-                downstream_services = set(pc_services)
-            # Remove critical services from the set — don't synthesize self-edges.
-            downstream_services -= critical_set
-            for crit_svc in critical_set:
-                for tgt_svc in downstream_services:
-                    scored_edges.append(
-                        CausalEdge(
-                            source=f"{crit_svc}_probe_up",
-                            target=f"{tgt_svc}_probe_up",
-                            confidence=0.90,
-                            lag=1,
-                            evidence=(
-                                f"{crit_svc} is DOWN per probe_up CRITICAL — "
-                                f"synthesized edge to downstream {tgt_svc}"
-                            ),
-                        )
-                    )
-            # Override root cause to the critical service with strong confidence.
-            # Pick the first critical service (stable via sorted set below).
-            root_service = sorted(critical_set)[0]
-            best_confidence = max(best_confidence, 0.75)
-            best_explanation = (
-                f"Root cause override: {root_service} is DOWN (probe_up CRITICAL). "
-                f"Synthesized edges from {root_service} to "
-                f"{len(downstream_services)} downstream service(s). "
-                + best_explanation
-            )
-
-        # 8. Build CausalGraph
-        causal_graph = CausalGraph(
-            edges=scored_edges,
-            root_cause=root_service,
-            root_cause_confidence=best_confidence,
+        return _run_pc_from_columns(
+            columns=columns,
+            services=services,
+            pc_services=pc_services,
+            critical_set=critical_set,
         )
-
-        return {
-            "causal_edges": [
-                {
-                    "source": e.source,
-                    "target": e.target,
-                    "confidence": e.confidence,
-                    "lag": e.lag,
-                }
-                for e in causal_graph.top_edges(10)
-            ],
-            "root_cause": root_service,
-            "root_cause_confidence": best_confidence,
-            "counterfactual": best_explanation or "No counterfactual analysis available.",
-            "graph_ascii": causal_graph.to_ascii(),
-        }
     except Exception:
         logger.exception("discover_causation failed")
         return _inconclusive("Causal discovery encountered an error.")
+
+
+def _run_pc_from_columns(
+    columns: dict[str, list[float]],
+    services: list[str],
+    pc_services: list[str],
+    critical_set: set[str],
+) -> dict:
+    """Core PC + counterfactual pipeline on an already-built ``columns`` dict.
+
+    Extracted from ``discover_causation()`` so both the live (Prometheus-
+    sourced) path and the offline (preloaded-DataFrame) path share identical
+    downstream logic. The input ``columns`` dict keys are
+    ``f"{service}_{metric}"`` and values are aligned numeric series.
+
+    Args:
+        columns: service-metric time series, already aligned in length.
+        services: full user-supplied service list (used for service-name
+            extraction from metric columns).
+        pc_services: services actually passed to PC (``services`` minus
+            ``critical_set``).
+        critical_set: services flagged CRITICAL elsewhere. Used for edge
+            synthesis + root-cause override.
+
+    Returns:
+        Same dict shape as ``discover_causation.invoke()``:
+        ``{causal_edges, root_cause, root_cause_confidence, counterfactual,
+        graph_ascii}``.
+    """
+    # Align all columns to the shortest length.
+    # Soft gate: allow partial data. Previously required ALL columns >= 10
+    # points, which bailed whenever any metric was briefly unavailable.
+    # New rule: min_len >= 6 AND at most 30% of columns are "short" (<6).
+    if not columns:
+        return _inconclusive("No metric data returned from Prometheus.")
+
+    lengths = [len(v) for v in columns.values()]
+    min_len = min(lengths)
+    short_count = sum(1 for length in lengths if length < 6)
+    short_frac = short_count / len(lengths)
+    if min_len < 6 or short_frac > 0.30:
+        return _inconclusive(
+            f"Insufficient data points (min={min_len}, "
+            f"{short_count}/{len(lengths)} columns are short). "
+            f"Need min>=6 and <=30% short columns."
+        )
+
+    # Truncate all columns to the shortest usable length so the DataFrame
+    # is rectangular. Use min_len — not a "compromise" value — to keep the
+    # alignment exact.
+    metrics_df = pd.DataFrame({k: v[:min_len] for k, v in columns.items()})
+
+    # Drop zero-variance columns before causal discovery.
+    # network_rx/tx_errors_rate are zero during normal operation, and
+    # crashed services return constant (all-zero) metrics. These cause
+    # a singular correlation matrix in Fisher's Z test.
+    variance = metrics_df.var()
+    zero_var_cols = variance[variance < 1e-12].index.tolist()
+    if zero_var_cols:
+        logger.info(
+            "Dropping %d zero-variance columns: %s",
+            len(zero_var_cols),
+            zero_var_cols[:5],
+        )
+        metrics_df = metrics_df.drop(columns=zero_var_cols)
+
+    if metrics_df.shape[1] < 2:
+        return _inconclusive("Fewer than 2 non-constant metric columns after filtering.")
+
+    # 2. Create time-lagged features
+    # Use lags=[1, 2] instead of [1, 2, 5] to reduce column count.
+    lagged_df = create_time_lags(metrics_df, lags=[1, 2])
+    # Lowered from 10 to 8 to match the softer input gate above.
+    if len(lagged_df) < 8:
+        return _inconclusive("Too few rows after time-lag creation.")
+
+    # Drop zero-variance lagged columns
+    lag_var = lagged_df.var()
+    zero_var_lagged = lag_var[lag_var < 1e-12].index.tolist()
+    if zero_var_lagged:
+        lagged_df = lagged_df.drop(columns=zero_var_lagged)
+
+    # Drop perfectly correlated columns (r > 0.999).
+    # Lagged copies of slow-changing metrics (e.g. memory) are nearly
+    # identical, making the correlation matrix singular even though no
+    # single column is zero-variance.
+    lagged_df = _drop_correlated_columns(lagged_df, threshold=0.999)
+
+    if lagged_df.shape[1] < 2:
+        return _inconclusive("Fewer than 2 independent columns after correlation filtering.")
+
+    # Add tiny jitter as a safety net against remaining near-singularities
+    rng = np.random.default_rng(42)
+    lagged_df = lagged_df + rng.normal(0, 1e-8, lagged_df.shape)
+
+    # 3. Run PC algorithm (depth capped at 3 to avoid combinatorial
+    #    explosion with many columns)
+    cg = discover_causal_graph(lagged_df, alpha=0.05, max_conditioning_set=3)
+
+    # 4. Parse directed edges
+    edges = parse_causal_graph(cg, list(lagged_df.columns))
+    # Note: if edges is empty AND no critical_services are provided, we
+    # bail out later. If critical_services ARE provided, we proceed with
+    # synthesized edges even when PC found nothing.
+    if not edges and not critical_set:
+        return _inconclusive("No directed causal edges discovered.")
+
+    # 5. Compute baseline stats (first 60% of data)
+    baseline_end = int(len(metrics_df) * 0.6)
+    baseline_df = metrics_df.iloc[:baseline_end]
+    baseline_stats = compute_baseline_stats(baseline_df)
+
+    # 6. Counterfactual scoring for edges between original (non-lagged) columns
+    anomaly_window = (baseline_end, len(metrics_df) - 1)
+    scored_edges: list[CausalEdge] = []
+    best_explanation = ""
+    best_confidence = 0.0
+
+    for edge in edges:
+        # Extract base service names (strip _lag suffixes)
+        src_base = _strip_lag(edge.source)
+        tgt_base = _strip_lag(edge.target)
+
+        if src_base in metrics_df.columns and tgt_base in metrics_df.columns:
+            conf, explanation = calculate_counterfactual_confidence(
+                metrics_df, src_base, tgt_base, anomaly_window, baseline_stats
+            )
+            scored_edges.append(
+                CausalEdge(
+                    source=edge.source,
+                    target=edge.target,
+                    confidence=conf,
+                    lag=edge.lag,
+                    evidence=explanation,
+                )
+            )
+            if conf > best_confidence:
+                best_confidence = conf
+                best_explanation = explanation
+        else:
+            scored_edges.append(edge)
+
+    # 7. Identify root cause: highest-confidence source with no incoming edges
+    sources = {e.source for e in scored_edges}
+    targets = {e.target for e in scored_edges}
+    root_candidates = sources - targets
+    if root_candidates:
+        root_cause = max(
+            root_candidates,
+            key=lambda s: max((e.confidence for e in scored_edges if e.source == s), default=0.0),
+        )
+    elif scored_edges:
+        top = max(scored_edges, key=lambda e: e.confidence)
+        root_cause = top.source
+    else:
+        root_cause = "unknown"
+
+    # Extract service name from metric column name (e.g. "cartservice_cpu" → "cartservice")
+    root_service = _extract_service(root_cause, services)
+
+    # 7b. CRITICAL-service priors: synthesize high-confidence edges from
+    # each critical (DOWN) service to each surviving service. Downstream
+    # targets are derived from PC edges when available, otherwise from
+    # the non-critical service list (so synthesis still runs when PC is
+    # inconclusive). Override root_cause to a critical service.
+    if critical_set:
+        downstream_services: set[str] = set()
+        if scored_edges:
+            downstream_services = {_extract_service(e.target, services) for e in scored_edges}
+            downstream_services.update({_extract_service(e.source, services) for e in scored_edges})
+        # Fall back to the non-critical service list if PC gave us nothing.
+        if not downstream_services:
+            downstream_services = set(pc_services)
+        # Remove critical services from the set — don't synthesize self-edges.
+        downstream_services -= critical_set
+        for crit_svc in critical_set:
+            for tgt_svc in downstream_services:
+                scored_edges.append(
+                    CausalEdge(
+                        source=f"{crit_svc}_probe_up",
+                        target=f"{tgt_svc}_probe_up",
+                        confidence=0.90,
+                        lag=1,
+                        evidence=(
+                            f"{crit_svc} is DOWN per probe_up CRITICAL — "
+                            f"synthesized edge to downstream {tgt_svc}"
+                        ),
+                    )
+                )
+        # Override root cause to the critical service with strong confidence.
+        # Pick the first critical service (stable via sorted set below).
+        root_service = sorted(critical_set)[0]
+        best_confidence = max(best_confidence, 0.75)
+        best_explanation = (
+            f"Root cause override: {root_service} is DOWN (probe_up CRITICAL). "
+            f"Synthesized edges from {root_service} to "
+            f"{len(downstream_services)} downstream service(s). " + best_explanation
+        )
+
+    # 8. Build CausalGraph
+    causal_graph = CausalGraph(
+        edges=scored_edges,
+        root_cause=root_service,
+        root_cause_confidence=best_confidence,
+    )
+
+    return {
+        "causal_edges": [
+            {
+                "source": e.source,
+                "target": e.target,
+                "confidence": e.confidence,
+                "lag": e.lag,
+            }
+            for e in causal_graph.top_edges(10)
+        ],
+        "root_cause": root_service,
+        "root_cause_confidence": best_confidence,
+        "counterfactual": best_explanation or "No counterfactual analysis available.",
+        "graph_ascii": causal_graph.to_ascii(),
+    }
 
 
 def _drop_correlated_columns(df: pd.DataFrame, threshold: float = 0.999) -> pd.DataFrame:

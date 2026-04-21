@@ -1,6 +1,20 @@
 """System prompt for the OpsAgent investigation agent.
 
-Injected as a SystemMessage at the start of every investigation.
+Two variants are exposed:
+
+* :data:`SYSTEM_PROMPT` — the default prompt used on live OTel Demo
+  fault-injection runs. Includes the ``currencyservice is BROKEN IN
+  BASELINE`` clause added in Session 12 to stop the agent from
+  misattributing the v1.10.0 SIGSEGV crash-loop as a real fault.
+* :data:`SYSTEM_PROMPT_OFFLINE` — identical to :data:`SYSTEM_PROMPT`
+  but with the currencyservice-exclusion clause removed. Used for
+  RCAEval offline evaluation where currencyservice is a legitimate
+  fault target in OB-variant cases. Session 15 introduced the split
+  after observing 0/25 Recall@1 on RCAEval-OB currencyservice cases
+  caused by the live-only clause.
+
+Both variants are derived from a single source string so edits never
+drift between modes.
 """
 
 SYSTEM_PROMPT = """You are OpsAgent, an expert Site Reliability Engineer AI assistant \
@@ -224,3 +238,37 @@ Your final report must use the RCA_REPORT_TEMPLATE format and must include:
 5. Prioritized remediation actions (immediate, then long-term)
 6. Relevant runbook references
 """
+
+
+# Offline-mode variant: strip the live-only currencyservice-exclusion
+# clause. On RCAEval-OB cases where currencyservice is the ground-truth
+# fault target, the live clause caused 0/25 Recall@1 by explicitly
+# forbidding the LLM from predicting it. Offline mode has no v1.10.0
+# crash-loop (the CSVs are pre-recorded, not live), so the clause is
+# actively harmful there.
+#
+# Both the clause text and the stripping are defined in terms of the
+# canonical :data:`SYSTEM_PROMPT` string so edits never drift between
+# modes. A module-level assertion below catches any future refactor
+# that breaks the substring match.
+
+_CURRENCYSERVICE_LIVE_CLAUSE = """
+
+- **currencyservice is BROKEN IN BASELINE — never pick it as root cause.** \
+  The OTel Demo v1.10.0 currencyservice image has a known SIGSEGV crash-loop bug: \
+  it throws `std::logic_error: basic_string: construction from null is not valid` \
+  and exits continuously, even when nothing is wrong with the system. You will see \
+  its `probe_up=0` and crash logs in EVERY investigation — this is BASELINE NOISE, \
+  not a fault. currencyservice is also not in the `affected_services` list for \
+  active investigations. If you ever find yourself about to name currencyservice \
+  as the root cause, stop and investigate another service instead."""
+
+assert _CURRENCYSERVICE_LIVE_CLAUSE in SYSTEM_PROMPT, (
+    "SYSTEM_PROMPT no longer contains the currencyservice exclusion clause "
+    "verbatim. If the prompt was edited intentionally, update "
+    "_CURRENCYSERVICE_LIVE_CLAUSE in src/agent/prompts/system_prompt.py "
+    "to match the new text. SYSTEM_PROMPT_OFFLINE derivation depends on "
+    "this exact-substring match."
+)
+
+SYSTEM_PROMPT_OFFLINE = SYSTEM_PROMPT.replace(_CURRENCYSERVICE_LIVE_CLAUSE, "")
