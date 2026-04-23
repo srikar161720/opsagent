@@ -40,6 +40,13 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/service_overview.json
+      # Embedding: drop X-Frame-Options: deny so the OpsAgent Streamlit
+      # dashboard (different origin) can iframe the Service Overview panel.
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      # Anonymous viewer so the iframe doesn't bounce to the login page.
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_ANONYMOUS_ORG_NAME=Main Org.
     depends_on:
       - prometheus
       - loki
@@ -177,6 +184,70 @@ services:
         limits:
           memory: 64M
           cpus: '0.25'
+
+  # ── OpsAgent API (FastAPI, :8000) ───────────────────────────────────
+  # Backend for the dashboard. Holds the in-memory AgentExecutor so we
+  # pin --workers 1 and a soft 1 GB memory cap. Models and ChromaDB are
+  # read-only bind mounts from the host — gitignored, too big/stateful
+  # to bake into the image.
+  opsagent-api:
+    build: .
+    image: opsagent:latest
+    container_name: opsagent-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models:ro
+      - ./data/chromadb:/app/data/chromadb:ro
+      - ./configs:/app/configs:ro
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - PROMETHEUS_URL=http://prometheus:9090
+      - LOKI_URL=http://loki:3100
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - CHROMADB_PATH=/app/data/chromadb
+      - AGENT_CONFIG_PATH=/app/configs/agent_config.yaml
+    depends_on:
+      - prometheus
+      - loki
+      - kafka
+    networks:
+      - opsagent-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+
+  # ── OpsAgent Dashboard (Streamlit, :8501) ───────────────────────────
+  # Reuses the same image as the API — only the command differs. Points
+  # at the api service via the internal network name.
+  opsagent-dashboard:
+    image: opsagent:latest
+    container_name: opsagent-dashboard
+    command:
+      - streamlit
+      - run
+      - src/serving/dashboard.py
+      - --server.port=8501
+      - --server.address=0.0.0.0
+      - --server.headless=true
+    ports:
+      - "8501:8501"
+    environment:
+      - OPSAGENT_API_BASE=http://opsagent-api:8000
+      - GRAFANA_URL=http://localhost:3000
+    depends_on:
+      - opsagent-api
+    networks:
+      - opsagent-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
 
 networks:
   opsagent-net:

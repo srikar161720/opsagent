@@ -1,0 +1,34 @@
+# OpsAgent Streamlit theme.
+# Palette + typography synthesized from the ui-ux-pro-max design consultation:
+# - base style = "Dark Mode (OLED)" x "Real-Time Monitoring" semantic colors
+# - typography = "Developer Mono" pairing (JetBrains Mono + IBM Plex Sans)
+# The full design rationale lives in src/serving/theme.py.
+
+[theme]
+base = "dark"
+
+# Accent used for selected tabs, form buttons, progress bars, slider tracks.
+# Cool sky-blue (distinct from Streamlit's default coral #FF4B4B).
+primaryColor = "#60A5FA"
+
+# Deep near-black with a slight cool tint — easier on eyes than pure black,
+# calmer than midnight-blue observability defaults.
+backgroundColor = "#0B0E14"
+
+# Card / elevated surface background. Just distinct enough from the page bg
+# to read as a surface without resorting to heavy shadows.
+secondaryBackgroundColor = "#151A23"
+
+# Body text: off-white with a cool tint; enough contrast without being harsh.
+textColor = "#E4E7EB"
+
+# Body font (streamlit-native); headings are upgraded to JetBrains Mono via
+# custom CSS in theme.py.
+font = "sans serif"
+
+[server]
+headless = true
+runOnSave = true
+
+[browser]
+gatherUsageStats = false
