@@ -66,7 +66,27 @@ make lint                     # Lint + format (ruff)
 make typecheck                # Type check (mypy)
 make test                     # Run unit tests
 make test-integration         # Run integration tests
+
+# Serving (host processes, auto-reload)
+make run                      # FastAPI at http://localhost:8000 (Swagger at /docs)
+make dashboard                # Streamlit at http://localhost:8501
+
+# Serving (Docker image)
+make docker-build             # Build the opsagent image
+make docker-up                # Run opsagent-api + opsagent-dashboard on opsagent-net
+make docker-down              # Stop them
+make api-health               # curl http://localhost:8000/health (pretty-printed)
 ```
+
+### End-to-End Demo
+
+1. `make infra-up` — start Prometheus, Loki, Kafka, Grafana, exporters.
+2. `make demo-up` — start the reduced OTel Demo microservices.
+3. `make run` (terminal 1) + `make dashboard` (terminal 2).
+4. Open <http://localhost:8501> → **Investigate** page → choose `cartservice`, submit.
+5. In a third terminal: `bash demo_app/fault_scenarios/01_service_crash.sh inject` to trigger a real fault (target `cartservice` is hardcoded in the script).
+6. Watch the dashboard render the RCA report with root cause `cartservice`.
+7. Restore: `bash demo_app/fault_scenarios/01_service_crash.sh restore`.
 
 ## Technology Stack
 

@@ -1,0 +1,82 @@
+# Published RCAEval baseline results (fallback numbers for Viz 8).
+#
+# Sources:
+#   - BARO paper (FSE'24 Best Artifact): https://github.com/phamquiluan/baro
+#     Table 3 explicitly reports BARO Avg@5 on the Online Boutique system
+#     per-fault-type. Only BARO has clearly-published per-OB-variant numbers
+#     from its own paper.
+#   - RCAEval paper (Pham et al., ACM WWW 2025 / FSE 2026): https://arxiv.org/abs/2412.17015
+#     The paper only reports detailed per-baseline numbers for Train Ticket
+#     (RE2-TT) due to space constraints (Section 5, Table 6). Per-variant OB
+#     numbers for CIRCA / RCD / CausalRCA / MicroCause are not available in
+#     the published paper.
+#
+# Metric notes:
+#   - "Avg@5" in RCAEval = average of AC@1..AC@5 (mean-over-top-k accuracy).
+#     This is NOT directly comparable to OpsAgent's Recall@1; it is strictly
+#     more generous because a top-5 hit still contributes. Any chart that
+#     mixes the two metrics MUST label which metric each bar represents.
+#   - "AC@1" = top-1 accuracy = Recall@1. Only a few per-fault AC@1 values
+#     are extractable from the RCAEval paper text; they're for Train Ticket.
+#
+# Honesty caveat: we only have OB-specific published numbers for BARO. All
+# other baselines' OB performance would require re-running them locally,
+# which is blocked because ``RCAEval.baselines`` is not in the installed pip
+# package (only the ``is_ok()`` stub ships on PyPI). See CLAUDE.md.
+
+# ───────────────────────────────────────────────────────────────────────────
+# BARO — Online Boutique (per-fault-type Avg@5 from BARO paper Table 3).
+# ───────────────────────────────────────────────────────────────────────────
+baro:
+  dataset: "Online Boutique (system across RE1/RE2/RE3 OB variants — BARO paper aggregates)"
+  metric: "Avg@5"
+  source: "BARO paper (FSE'24), Table 3, https://github.com/phamquiluan/baro"
+  per_fault:
+    cpu: 0.91
+    mem: 0.96
+    delay: 0.95
+    loss: 0.62
+  overall_ob: 0.86  # all fault types combined (BARO paper)
+
+# ───────────────────────────────────────────────────────────────────────────
+# RCAEval paper (Train Ticket numbers — proxy, NOT OB).
+# ───────────────────────────────────────────────────────────────────────────
+# Use these only when the chart is explicitly labelled as Train-Ticket
+# reference data; do NOT plot them on an OB axis without the caveat.
+
+rcaeval_paper_train_ticket:
+  metric: "Avg@5"
+  source: "RCAEval paper (arxiv.org/abs/2412.17015), Section 5 Preliminary Experiments, Train Ticket RE2"
+  baro:
+    cpu: 0.72
+    mem: 0.99
+    disk: 1.00
+    socket: 0.83
+    delay: 0.63
+    loss: 0.64
+    average: 0.80
+  # Best-across-the-paper averages, reported in the narrative:
+  circa_best_avg5: 0.46
+  rcd_best_avg5: 0.54
+
+# ───────────────────────────────────────────────────────────────────────────
+# AC@1 spot values from RCAEval paper narrative (Train Ticket).
+# ───────────────────────────────────────────────────────────────────────────
+rcaeval_paper_ac_at_1_train_ticket:
+  source: "RCAEval paper (arxiv.org/abs/2412.17015), Section 5 narrative"
+  baro:
+    disk: 1.00
+    delay: 0.13
+    loss: 0.07
+
+# ───────────────────────────────────────────────────────────────────────────
+# Visualization hint for notebooks/08_evaluation_analysis.ipynb Viz 8.
+# ───────────────────────────────────────────────────────────────────────────
+# The visualization should plot:
+#   (a) OpsAgent Recall@1 on RE1-OB (0.080), RE2-OB (0.077), combined (0.079).
+#   (b) BARO Avg@5 on OB = 0.86 — labelled as "BARO Avg@5 (BARO paper OB)".
+#   (c) OPTIONAL: CIRCA / RCD Avg@5 from Train Ticket, clearly labelled
+#       as TT reference since OB-specific numbers are not published.
+# Include a side note in the notebook cell explaining Avg@5 vs Recall@1 are
+# different metrics and that OpsAgent's 0.33 Recall@3 is closer to a fair
+# comparison against BARO's Avg@5.
