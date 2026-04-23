@@ -13,10 +13,13 @@ from tests.evaluation.metrics_calculator import (
     confidence_interval,
     detection_latency,
     load_results,
+    mcnemar_test,
     mttr_proxy,
+    per_group_recall,
     precision,
     recall_at_1,
     recall_at_3,
+    wilson_ci,
 )
 
 
@@ -235,3 +238,167 @@ class TestCalculateMetrics:
         metrics = calculate_metrics(sample_results)
         # Only correct predictions: 45.0 and 60.0
         assert abs(metrics.avg_mttr_proxy - 52.5) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# TestLoadResultsSkipsSummary
+# ---------------------------------------------------------------------------
+class TestLoadResultsSkipsSummary:
+    def test_skips_summary_json(self, tmp_path: Path) -> None:
+        (tmp_path / "summary.json").write_text(json.dumps({"total_cases": 2}))
+        (tmp_path / "case_1.json").write_text(json.dumps({"test_id": "case_1"}))
+        (tmp_path / "case_2.json").write_text(json.dumps({"test_id": "case_2"}))
+        results = load_results(str(tmp_path))
+        ids = sorted(r["test_id"] for r in results)
+        assert ids == ["case_1", "case_2"]
+
+    def test_includes_summary_when_renamed(self, tmp_path: Path) -> None:
+        # Only the exact filename "summary.json" is skipped.
+        (tmp_path / "my_summary.json").write_text(json.dumps({"test_id": "my_summary"}))
+        results = load_results(str(tmp_path))
+        assert len(results) == 1
+
+
+# ---------------------------------------------------------------------------
+# TestWilsonCI
+# ---------------------------------------------------------------------------
+class TestWilsonCI:
+    def test_all_success_lower_bound_above_90pct(self) -> None:
+        # At n=35 with 35/35 correct, the Wilson lower bound should be ~0.90.
+        lo, hi = wilson_ci(35, 35)
+        assert 0.88 < lo < 0.92
+        # Upper bound clamps to 1.0.
+        assert 0.999 < hi <= 1.0
+
+    def test_zero_success_upper_bound_below_10pct(self) -> None:
+        lo, hi = wilson_ci(0, 35)
+        assert lo >= 0.0
+        assert 0.08 < hi < 0.12
+
+    def test_interval_bounds_proportion(self) -> None:
+        # The Wilson CI is centred on a shifted estimate so it doesn't
+        # strictly contain the point estimate when close to boundaries —
+        # but for reasonable-n, non-degenerate proportions it should.
+        lo, hi = wilson_ci(4, 35)
+        p_hat = 4 / 35
+        assert lo <= p_hat <= hi
+        assert 0.03 < lo < 0.08
+        assert 0.22 < hi < 0.30
+
+    def test_rejects_non_positive_n(self) -> None:
+        with pytest.raises(ValueError):
+            wilson_ci(0, 0)
+        with pytest.raises(ValueError):
+            wilson_ci(0, -1)
+
+    def test_rejects_out_of_range_successes(self) -> None:
+        with pytest.raises(ValueError):
+            wilson_ci(-1, 10)
+        with pytest.raises(ValueError):
+            wilson_ci(11, 10)
+
+
+# ---------------------------------------------------------------------------
+# TestMcnemarTest
+# ---------------------------------------------------------------------------
+class TestMcnemarTest:
+    def test_identical_results_not_significant(self) -> None:
+        ops = [True, False, True, False, True]
+        baseline = [True, False, True, False, True]
+        result = mcnemar_test(ops, baseline)
+        # Zero discordant pairs -> exact binomial p=1.0.
+        assert result["p_value"] == 1.0
+        assert result["significant"] is False
+        assert result["n01"] == 0
+        assert result["n10"] == 0
+        assert result["n"] == 5
+
+    def test_strictly_better_ops_is_significant(self) -> None:
+        # 10 tests; OpsAgent gets all right, baseline gets all wrong.
+        # n10 = 10, n01 = 0 -> highly significant via exact binomial.
+        ops = [True] * 10
+        baseline = [False] * 10
+        result = mcnemar_test(ops, baseline)
+        assert result["n10"] == 10
+        assert result["n01"] == 0
+        assert result["p_value"] < 0.05
+        assert result["significant"] is True
+
+    def test_mixed_discordance(self) -> None:
+        # Some cases each way; tests counts are correct.
+        ops = [True, True, False, True, False]
+        baseline = [True, False, True, False, False]
+        result = mcnemar_test(ops, baseline)
+        assert result["n10"] == 2  # ops right / baseline wrong at indexes 1, 3
+        assert result["n01"] == 1  # ops wrong / baseline right at index 2
+        assert result["n"] == 5
+
+    def test_rejects_mismatched_lengths(self) -> None:
+        with pytest.raises(ValueError):
+            mcnemar_test([True], [True, False])
+
+    def test_rejects_empty_inputs(self) -> None:
+        with pytest.raises(ValueError):
+            mcnemar_test([], [])
+
+
+# ---------------------------------------------------------------------------
+# TestPerGroupRecall
+# ---------------------------------------------------------------------------
+class TestPerGroupRecall:
+    def _record(
+        self,
+        *,
+        fault_type: str,
+        ground_truth: str,
+        predicted: str,
+        top3: list[str] | None = None,
+        is_correct: bool | None = None,
+    ) -> dict:
+        return {
+            "fault_type": fault_type,
+            "ground_truth": ground_truth,
+            "predicted_root_cause": predicted,
+            "top_3_predictions": top3 or [predicted, "other1", "other2"],
+            "is_correct": predicted == ground_truth if is_correct is None else is_correct,
+        }
+
+    def test_group_by_fault_type(self) -> None:
+        records = [
+            self._record(fault_type="crash", ground_truth="cart", predicted="cart"),
+            self._record(fault_type="crash", ground_truth="cart", predicted="frontend"),
+            self._record(fault_type="latency", ground_truth="frontend", predicted="frontend"),
+        ]
+        grouped = per_group_recall(records, "fault_type")
+        assert grouped["crash"]["n"] == 2
+        assert grouped["crash"]["correct"] == 1
+        assert grouped["crash"]["recall_at_1"] == 0.5
+        assert grouped["latency"]["n"] == 1
+        assert grouped["latency"]["recall_at_1"] == 1.0
+
+    def test_group_by_ground_truth_for_per_service(self) -> None:
+        # Per-service recall: group by ground_truth.
+        records = [
+            self._record(fault_type="cpu", ground_truth="adservice", predicted="frontend"),
+            self._record(fault_type="cpu", ground_truth="adservice", predicted="frontend"),
+            self._record(fault_type="mem", ground_truth="cart", predicted="cart"),
+        ]
+        grouped = per_group_recall(records, "ground_truth")
+        assert grouped["adservice"]["recall_at_1"] == 0.0
+        assert grouped["cart"]["recall_at_1"] == 1.0
+
+    def test_empty_input_returns_empty_dict(self) -> None:
+        assert per_group_recall([], "fault_type") == {}
+
+    def test_counts_top3_hits(self) -> None:
+        records = [
+            self._record(
+                fault_type="cpu",
+                ground_truth="adservice",
+                predicted="frontend",
+                top3=["frontend", "adservice", "checkoutservice"],
+            ),
+        ]
+        grouped = per_group_recall(records, "fault_type")
+        assert grouped["cpu"]["recall_at_3"] == 1.0
+        assert grouped["cpu"]["correct_top3"] == 1

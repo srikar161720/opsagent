@@ -544,8 +544,7 @@ class TestInterCaseDelay:
 
         delay_calls = [call for call in mock_sleep.call_args_list if call.args[0] == 7.0]
         assert len(delay_calls) == 2, (
-            f"Expected 2 inter-case sleeps of 7.0s (between 3 cases), "
-            f"got {len(delay_calls)}"
+            f"Expected 2 inter-case sleeps of 7.0s (between 3 cases), got {len(delay_calls)}"
         )
 
     @patch("tests.evaluation.rcaeval_evaluation.RCAEvalDataAdapter")

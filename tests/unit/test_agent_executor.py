@@ -152,9 +152,7 @@ class TestAgentExecutorInvestigate:
         assert state["preloaded_metrics"] is None
         assert state["preloaded_logs"] is None
 
-    def test_investigate_live_mode_uses_live_system_prompt(
-        self, sample_agent_config: dict
-    ) -> None:
+    def test_investigate_live_mode_uses_live_system_prompt(self, sample_agent_config: dict) -> None:
         """No ``metrics`` kwarg → SYSTEM_PROMPT (with currencyservice
         exclusion clause) is injected as the SystemMessage."""
         from langchain_core.messages import SystemMessage

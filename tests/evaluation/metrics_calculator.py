@@ -1,18 +1,22 @@
 """Evaluation metrics for OpsAgent fault injection and cross-system tests.
 
 Computes Recall@1, Recall@3, Precision, Detection Latency, MTTR Proxy,
-confidence intervals, and per-fault-type breakdowns from per-test JSON results.
+confidence intervals (t-distribution and Wilson score), McNemar's paired
+significance test, and per-group breakdowns (per-fault, per-service,
+per-variant) from per-test JSON results.
 """
 
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import scipy.stats as stats
+from statsmodels.stats.contingency_tables import mcnemar as _mcnemar
 
 
 @dataclass
@@ -31,9 +35,16 @@ class EvaluationResults:
 
 
 def load_results(results_dir: str) -> list[dict]:
-    """Load all per-test JSON files from a directory."""
+    """Load all per-test JSON files from a directory.
+
+    Skips ``summary.json`` files (produced by the RCAEval evaluator as a
+    pre-computed aggregate alongside the per-case files) so callers can
+    iterate a directory without filtering them out manually.
+    """
     results = []
     for f in sorted(Path(results_dir).glob("*.json")):
+        if f.name == "summary.json":
+            continue
         with open(f) as fp:
             results.append(json.load(fp))
     return results
@@ -152,3 +163,113 @@ def calculate_metrics(results: list[dict]) -> EvaluationResults:
         latency_by_fault=latency_by_fault,
         ci_recall_at_1=ci,
     )
+
+
+def wilson_ci(
+    successes: int,
+    n: int,
+    confidence: float = 0.95,
+) -> tuple[float, float]:
+    """Wilson score interval for a binomial proportion.
+
+    Preferred over the t-distribution when the outcome is binary (is_correct)
+    and the point estimate may hit the boundary (p = 0 or p = 1). At n=35
+    with p=1.0 the t-distribution collapses to a zero-width interval; the
+    Wilson lower bound is ~0.901, which is the correct honest answer.
+
+    Reference: Wilson, E.B. (1927). "Probable Inference, the Law of Succession,
+    and Statistical Inference". JASA 22 (158): 209-212.
+    """
+    if n <= 0:
+        raise ValueError("n must be a positive integer")
+    if successes < 0 or successes > n:
+        raise ValueError("successes must be between 0 and n inclusive")
+
+    p_hat = successes / n
+    z = stats.norm.ppf((1 + confidence) / 2)
+    denom = 1 + z**2 / n
+    center = (p_hat + z**2 / (2 * n)) / denom
+    half = (z / denom) * np.sqrt(p_hat * (1 - p_hat) / n + z**2 / (4 * n * n))
+    lo = max(0.0, float(center - half))
+    hi = min(1.0, float(center + half))
+    return (lo, hi)
+
+
+def mcnemar_test(
+    ops_correct: list[bool],
+    baseline_correct: list[bool],
+    *,
+    exact: bool = True,
+) -> dict:
+    """McNemar's paired test on matched binary outcomes.
+
+    Tests the null hypothesis that OpsAgent and a baseline have the same
+    accuracy, using the 2x2 contingency of discordant pairs:
+
+    * ``n01`` = baseline right, OpsAgent wrong
+    * ``n10`` = OpsAgent right, baseline wrong
+
+    ``exact=True`` uses the binomial distribution (correct for small
+    discordance counts; recommended for n < 25). Returns the p-value and
+    whether the result is significant at alpha=0.05 alongside the counts
+    so the caller can report them in the results doc.
+
+    Note: this test assumes the same test cases were evaluated by both
+    investigators. In Session 13/14 the test IDs match by definition
+    (same fault_type + run_id) but the runs physically executed on
+    different calendar dates, so this is "matched by design" rather than
+    "experimentally paired". Document that caveat when reporting.
+    """
+    if len(ops_correct) != len(baseline_correct):
+        raise ValueError("ops_correct and baseline_correct must have the same length")
+    if not ops_correct:
+        raise ValueError("cannot run McNemar test on empty inputs")
+
+    n01 = sum(1 for a, b in zip(ops_correct, baseline_correct, strict=True) if not a and b)
+    n10 = sum(1 for a, b in zip(ops_correct, baseline_correct, strict=True) if a and not b)
+    table = [[0, n01], [n10, 0]]
+    result = _mcnemar(table, exact=exact)
+    p_value = float(result.pvalue)
+    return {
+        "p_value": p_value,
+        "significant": p_value < 0.05,
+        "n01": n01,
+        "n10": n10,
+        "n": len(ops_correct),
+    }
+
+
+def per_group_recall(
+    results: list[dict],
+    group_key: str,
+) -> dict[str, dict[str, float | int]]:
+    """Group results by a key and compute Recall@1 / Recall@3 / counts per group.
+
+    Generic replacement for the per-fault-type loop inside ``calculate_metrics``.
+    Works for any categorical key present on the result dicts — e.g.
+    ``"fault_type"`` for OTel Demo, ``"ground_truth"`` for per-service
+    breakdowns, ``"dataset"`` for RCAEval RE1/RE2 splits.
+
+    Each group entry contains: ``n``, ``recall_at_1``, ``recall_at_3``,
+    ``correct``, ``correct_top3`` for downstream plotting and CIs.
+    """
+    buckets: dict[str, list[dict]] = defaultdict(list)
+    for record in results:
+        key = str(record.get(group_key, "unknown"))
+        buckets[key].append(record)
+
+    out: dict[str, dict[str, float | int]] = {}
+    for key, subset in buckets.items():
+        n = len(subset)
+        correct = sum(1 for r in subset if r.get("is_correct"))
+        correct_top3 = sum(
+            1 for r in subset if r.get("ground_truth") in (r.get("top_3_predictions") or [])[:3]
+        )
+        out[key] = {
+            "n": n,
+            "correct": correct,
+            "correct_top3": correct_top3,
+            "recall_at_1": correct / n if n else 0.0,
+            "recall_at_3": correct_top3 / n if n else 0.0,
+        }
+    return dict(sorted(out.items()))
