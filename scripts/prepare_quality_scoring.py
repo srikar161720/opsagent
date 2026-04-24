@@ -1,12 +1,12 @@
 """Prepare the explanation-quality scoring artefacts.
 
-Generates two files from the Session 13 OpsAgent OTel Demo results so the user
+Generates two files from the primary-evaluation OpsAgent OTel Demo results so the user
 can manually score every RCA report against the 5-point rubric in
 ``docs/success_metrics.md``:
 
-* ``data/evaluation/explanation_quality_scores.csv`` — skeleton with
+* ``data/evaluation/explanation_quality_scores.csv``: skeleton with
   ``test_id`` and ``fault_type`` pre-filled; all score columns blank.
-* ``data/evaluation/quality_scoring_guide.md`` — rubric + per-fault-type
+* ``data/evaluation/quality_scoring_guide.md``: rubric plus per-fault-type
   index of report filenames with direct markdown links.
 
 Usage::
@@ -25,7 +25,7 @@ from collections import defaultdict
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_RESULTS_DIR = PROJECT_ROOT / "data" / "evaluation" / "results_session13"
+DEFAULT_RESULTS_DIR = PROJECT_ROOT / "data" / "evaluation" / "results_fault_injection_tests"
 DEFAULT_REPORTS_DIR = DEFAULT_RESULTS_DIR / "reports"
 DEFAULT_CSV = PROJECT_ROOT / "data" / "evaluation" / "explanation_quality_scores.csv"
 DEFAULT_GUIDE = PROJECT_ROOT / "data" / "evaluation" / "quality_scoring_guide.md"
@@ -72,7 +72,7 @@ SUB_DIMENSIONS = "\n".join(_SUB_DIMENSION_LINES) + "\n"
 
 
 def _collect_results(results_dir: Path) -> list[dict]:
-    """Load every per-test JSON from Session 13 (skip ``summary.json``)."""
+    """Load every per-test JSON from the primary-evaluation results directory (skip ``summary.json``)."""
     rows: list[dict] = []
     for path in sorted(results_dir.glob("*.json")):
         if path.name == "summary.json":
@@ -114,11 +114,11 @@ def _build_guide_markdown(results: list[dict], reports_dir: Path) -> str:
         "",
         "## Overview",
         "",
-        f"OpsAgent's primary evaluation track produced **{len(results)}** RCA reports during ",
-        "Session 13 (OTel Demo fault injection, 7 fault types x 5 runs each). This guide ",
+        f"OpsAgent's primary evaluation track produced **{len(results)}** RCA reports on the ",
+        "OTel Demo fault-injection suite (7 fault types x 5 runs each). This guide ",
         "walks through the scoring workflow; scores land in ",
         "`data/evaluation/explanation_quality_scores.csv` which already has `test_id` and ",
-        "`fault_type` pre-populated — all you need to do is fill the 5 score columns and ",
+        "`fault_type` pre-populated, so all you need to do is fill the 5 score columns and ",
         "an optional `notes` column for each row.",
         "",
         "## 5-Point Rubric",
@@ -199,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
         "--results-dir",
         type=Path,
         default=DEFAULT_RESULTS_DIR,
-        help="Directory with per-test JSON results (default: Session 13 OpsAgent).",
+        help="Directory with per-test JSON results (default: the primary-evaluation results directory).",
     )
     parser.add_argument(
         "--reports-dir",

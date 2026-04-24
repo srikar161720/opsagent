@@ -33,8 +33,8 @@ from tests.evaluation.metrics_calculator import load_results  # noqa: E402
 SAVE_DIR = PROJECT_ROOT / "docs" / "images" / "evaluation_charts"
 SUMMARY_PATH = PROJECT_ROOT / "data" / "evaluation" / "evaluation_summary.json"
 QUALITY_CSV = PROJECT_ROOT / "data" / "evaluation" / "explanation_quality_scores.csv"
-SESSION13_DIR = PROJECT_ROOT / "data" / "evaluation" / "results_session13"
-SESSION13_REPORTS = SESSION13_DIR / "reports"
+PRIMARY_DIR = PROJECT_ROOT / "data" / "evaluation" / "results_fault_injection_tests"
+PRIMARY_REPORTS = PRIMARY_DIR / "reports"
 BASELINE_DIRS = {
     "Rule-Based": PROJECT_ROOT / "data" / "evaluation" / "baseline_rule_based",
     "AD-Only": PROJECT_ROOT / "data" / "evaluation" / "baseline_ad_only",
@@ -64,7 +64,7 @@ plt.rcParams.update(
 @dataclass(frozen=True)
 class LoadedData:
     summary: dict
-    session13: list[dict]
+    primary: list[dict]
     baselines: dict[str, list[dict]]
     rcaeval: dict[str, list[dict]]
 
@@ -78,10 +78,10 @@ def _load_summary() -> dict:
 
 def load_all() -> LoadedData:
     summary = _load_summary()
-    session13 = load_results(str(SESSION13_DIR))
+    primary = load_results(str(PRIMARY_DIR))
     baselines = {label: load_results(str(path)) for label, path in BASELINE_DIRS.items()}
     rcaeval = {label: load_results(str(path)) for label, path in RCAEVAL_DIRS.items()}
-    return LoadedData(summary=summary, session13=session13, baselines=baselines, rcaeval=rcaeval)
+    return LoadedData(summary=summary, primary=primary, baselines=baselines, rcaeval=rcaeval)
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +90,7 @@ def load_all() -> LoadedData:
 
 
 def plot_viz1_recall_by_fault(data: LoadedData, out_path: Path) -> None:
-    per_fault = data.summary["directories"]["opsagent_otel_session13"]["per_fault"]
+    per_fault = data.summary["directories"]["opsagent_otel_primary"]["per_fault"]
     faults = sorted(per_fault.keys())
     recalls = [per_fault[f]["recall_at_1"] for f in faults]
     colors = ["#2ecc71" if r >= 0.8 else "#e67e22" if r >= 0.6 else "#e74c3c" for r in recalls]
@@ -127,7 +127,7 @@ def plot_viz1_recall_by_fault(data: LoadedData, out_path: Path) -> None:
 def plot_viz2_baseline_comparison(data: LoadedData, out_path: Path) -> None:
     investigators = ["OpsAgent", "Rule-Based", "AD-Only", "LLM-No-Tools"]
     labels = [
-        "opsagent_otel_session13",
+        "opsagent_otel_primary",
         "rule_based_otel",
         "ad_only_otel",
         "llm_no_tools_otel",
@@ -174,7 +174,7 @@ def plot_viz2_baseline_comparison(data: LoadedData, out_path: Path) -> None:
 
 def plot_viz3_detection_latency(data: LoadedData, out_path: Path) -> None:
     per_fault_latency: dict[str, list[float]] = {}
-    for record in data.session13:
+    for record in data.primary:
         fault = record.get("fault_type", "unknown")
         latency = record.get("detection_latency_seconds")
         if latency is None:
@@ -222,7 +222,7 @@ def _confusion_matrix(results: list[dict]) -> tuple[list[str], np.ndarray]:
 
 
 def plot_viz4_confusion_matrix(data: LoadedData, out_path: Path) -> None:
-    ops_services, ops_matrix = _confusion_matrix(data.session13)
+    ops_services, ops_matrix = _confusion_matrix(data.primary)
     llm_services, llm_matrix = _confusion_matrix(data.baselines["LLM-No-Tools"])
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
@@ -283,7 +283,7 @@ def plot_viz5_causal_examples(data: LoadedData, out_path: Path) -> None:
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     for ax, (test_id, title) in zip(axes, exemplars, strict=True):
-        report_path = SESSION13_REPORTS / f"{test_id}.md"
+        report_path = PRIMARY_REPORTS / f"{test_id}.md"
         if not report_path.is_file():
             ax.text(0.5, 0.5, f"Report not found:\n{test_id}", ha="center", va="center")
             ax.set_axis_off()
@@ -305,7 +305,7 @@ def plot_viz5_causal_examples(data: LoadedData, out_path: Path) -> None:
         ax.set_axis_off()
 
     fig.suptitle(
-        "Causal-Analysis Excerpts — 3 Exemplar OpsAgent RCA Reports (Session 13)",
+        "Causal-Analysis Excerpts: 3 Exemplar OpsAgent RCA Reports",
         fontsize=14,
     )
     fig.tight_layout()
@@ -386,9 +386,9 @@ def _count_tool_mentions_in_report(report_text: str) -> dict[str, int]:
 
 
 def plot_viz6_tool_usage(data: LoadedData, out_path: Path) -> None:
-    """Pie chart of tool mentions across all 35 Session 13 RCA reports.
+    """Pie chart of tool mentions across all 35 RCA reports from the primary evaluation.
 
-    Caveat: this is a PROXY, not a direct tool-call count. Session 13
+    Caveat: this is a PROXY, not a direct tool-call count. The primary-evaluation
     results JSONs did not capture per-call tool usage, so this counts how
     often each tool's *signals* appear in the final RCA reports. The agent's
     deterministic sweep (36 calls per investigation: 5 metrics x 6 services
@@ -398,11 +398,11 @@ def plot_viz6_tool_usage(data: LoadedData, out_path: Path) -> None:
     """
     totals: Counter[str] = Counter()
     report_count = 0
-    for record in data.session13:
+    for record in data.primary:
         test_id = record.get("test_id")
         if not test_id:
             continue
-        report_path = SESSION13_REPORTS / f"{test_id}.md"
+        report_path = PRIMARY_REPORTS / f"{test_id}.md"
         if not report_path.is_file():
             continue
         counts = _count_tool_mentions_in_report(report_path.read_text())
@@ -535,7 +535,7 @@ def plot_viz7_quality_distribution(out_path: Path) -> bool:
     )
     ax.set_xlabel("Overall Score (1-5)")
     ax.set_ylabel("Count")
-    ax.set_title(f"Explanation Quality Distribution (n={len(arr)} OpsAgent reports, Session 13)")
+    ax.set_title(f"Explanation Quality Distribution (n={len(arr)} OpsAgent reports)")
     ax.set_xlim(0.75, 5.25)
     ax.legend()
     ax.grid(axis="y", linestyle=":", alpha=0.4)

@@ -51,19 +51,19 @@ def code(src: str) -> dict:
 
 CELLS: list[dict] = [
     md("""\
-# 08 — Phase 5 Evaluation Analysis
+# 08: Evaluation Analysis
 
-Final analysis notebook for OpsAgent's Phase 5 evaluation. Aggregates results
-from Sessions 13-15 and produces the 9 visualizations in `context/evaluation_strategy.md` §9.
+Consolidated analysis notebook for OpsAgent's evaluation. Aggregates results
+and produces the 9 visualizations referenced in `docs/evaluation_results.md`.
 
 **Data sources**
 
-| Source | Directory | Sessions |
-|---|---|---|
-| OpsAgent OTel Demo (35 tests) | `data/evaluation/results_session13/` | 13 |
-| Rule-Based / AD-Only / LLM-Without-Tools (35 each) | `data/evaluation/baseline_*/` | 14 |
-| RCAEval RE1-OB (125 cases) | `data/evaluation/rcaeval_re1_ob/` | 15 |
-| RCAEval RE2-OB (91 cases) | `data/evaluation/rcaeval_re2_ob/` | 15 |
+| Source | Directory |
+|---|---|
+| OpsAgent OTel Demo (35 tests) | `data/evaluation/results_fault_injection_tests/` |
+| Rule-Based / AD-Only / LLM-Without-Tools (35 each) | `data/evaluation/baseline_*/` |
+| RCAEval RE1-OB (125 cases) | `data/evaluation/rcaeval_re1_ob/` |
+| RCAEval RE2-OB (91 cases) | `data/evaluation/rcaeval_re2_ob/` |
 
 The heavy lifting (loading, statistical tests, plotting) lives in `scripts/make_evaluation_charts.py`
 and `scripts/run_evaluation.py`; this notebook is a thin presentation layer.
@@ -125,15 +125,15 @@ for label, payload in summary.items():
     )
 """),
     md("""\
-## 2. Primary Evaluation — OTel Demo (Session 13)
+## 2. Primary Evaluation: OTel Demo
 
 OpsAgent's primary track: 7 fault types × 5 runs = 35 tests injected on the
-reduced OTel Astronomy Shop stack. Session 13 achieved **100% Recall@1 and
+reduced OTel Astronomy Shop stack. The primary evaluation achieved **100% Recall@1 and
 100% Recall@3** at uniform 0.75 confidence (the CRITICAL-override band). The
-95% Wilson CI on Recall@1 is [0.901, 1.0] — even the lower bound clears the
-80% Phase-5 target.
+95% Wilson CI on Recall@1 is [0.901, 1.0], so even the lower bound clears the
+80% target.
 
-Memory-pressure detection (was 40% in Session 12) moved to 100% after adding
+Memory-pressure detection (previously the weakest class at 40%) moved to 100% after adding
 the `container_spec_memory_limit_bytes` gauge + `memory_utilization` CRITICAL
 detector with peak-based trigger.
 """),
@@ -148,7 +148,7 @@ plot_viz3_detection_latency(data, SAVE_DIR / "03_detection_latency.png")
 display(Image(str(SAVE_DIR / "03_detection_latency.png")))
 """),
     md("""\
-## 3. Internal Baseline Comparison (Session 14)
+## 3. Internal Baseline Comparison
 
 Three ablation baselines on the same 35-test suite:
 
@@ -156,9 +156,9 @@ Three ablation baselines on the same 35-test suite:
 - **AD-Only:** LSTM-AE reconstruction-error ranking (no agent).
 - **LLM-Without-Tools:** Gemini with system prompt + alert context, no tool access.
 
-Each run is matched by `test_id` to Session 13's OpsAgent run. Note that the
-baselines physically executed on 2026-04-20, while OpsAgent was 2026-04-19 —
-the pairing is **by test definition (same fault + run_id)** not experimental,
+Each run is matched by `test_id` to the OpsAgent primary run. Note that the
+baselines physically executed on 2026-04-20 while the OpsAgent run was on 2026-04-19,
+so the pairing is **by test definition (same fault + run_id)** not experimental,
 since each ran on a freshly recycled Docker stack.
 
 McNemar's exact test (paired binary) confirms OpsAgent's advantage is highly
@@ -201,7 +201,7 @@ remained at baseline…"). Three exemplars below show the structure across
 fault families.
 
 Agent tool usage (Viz 6) is a **proxy** from regex matches in the RCA report
-text — Session 13 result JSONs did not capture per-call tool counts, and the
+text; the primary-evaluation result JSONs did not capture per-call tool counts, and the
 deterministic sweep (36 calls per investigation: 5 metrics × 6 services + 6
 log calls) dominates by construction.
 """),
@@ -216,10 +216,10 @@ plot_viz6_tool_usage(data, SAVE_DIR / "06_tool_usage.png")
 display(Image(str(SAVE_DIR / "06_tool_usage.png")))
 """),
     md("""\
-## 5. Cross-System Validation — RCAEval-OB (Session 15)
+## 5. Cross-System Validation: RCAEval-OB
 
-OpsAgent ran in offline-mode against RE1-OB (125 cases) and RE2-OB (91 cases)
-— 216 total cases. RE3-OB (30 cases) aborted at 4 due to Gemini 2.5 Flash RPD
+OpsAgent ran in offline-mode against RE1-OB (125 cases) and RE2-OB (91 cases),
+216 total cases. RE3-OB (30 cases) aborted at 4 due to Gemini 2.5 Flash RPD
 exhaustion and is excluded from all aggregates. SS and TT variants were not
 evaluated (topology/vocabulary mismatch with OpsAgent's OTel-Demo-trained
 reasoning).
@@ -229,7 +229,7 @@ Combined result: **Recall@1 7.9% (95% Wilson CI [5.0%, 12.2%])**,
 (1) vocab-unfamiliar services (adservice 0/25), (2) low-traffic services
 (currencyservice 0/43), (3) non-propagating faults (cpu 0/41).
 
-**Key finding:** Session 13's 100% depended heavily on OpsAgent's custom
+**Key finding:** The primary-track 100% depended heavily on OpsAgent's custom
 telemetry stack (Service Probe Exporter probe_up, memory_utilization CRITICAL
 detectors). RCAEval CSVs are metrics-only with none of those direct-
 observability signals, so the native LLM+PC reasoning pipeline drops to
@@ -261,7 +261,7 @@ display(Image(str(SAVE_DIR / "09_rcaeval_re2_by_fault.png")))
     md("""\
 ## 6. Explanation Quality (Manual Scoring)
 
-35 Session 13 OpsAgent RCA reports were scored against the 5-point rubric in
+35 OpsAgent RCA reports from the primary evaluation were scored against the 5-point rubric in
 `docs/success_metrics.md`. Each report receives 5 sub-dimension scores
 (root_cause_accuracy, evidence_quality, causal_analysis, recommendations,
 presentation); the overall score is the mean of the five.
@@ -280,7 +280,7 @@ if not filled:
     ))
 """),
     md("""\
-## 7. Phase 5 Target Scorecard
+## 7. Target Scorecard
 
 | Metric | Target | Achieved | Status |
 |---|---|---|---|
@@ -288,29 +288,29 @@ if not filled:
 | Recall@3 (OTel Demo) | ≥ 95% | **100%** | ✅ met |
 | Precision (24h FP-rate) | ≥ 70% | *not measured (original target)*; classifier precision 1.000 / 1.000 (micro/macro, Section 4.4) | partial |
 | Detection Latency | < 60 s | mean 125 s across 35 tests | ❌ above target (driven by 120 s pre-investigation wait) |
-| MTTR Proxy | ≥ 50% reduction | 24 s OpsAgent vs 0.1 s baselines — *not a meaningful comparison* | — |
+| MTTR Proxy | ≥ 50% reduction | 24 s OpsAgent vs 0.1 s baselines; *not a meaningful comparison* | n/a |
 | Explanation Quality | ≥ 4.0 / 5.0 | **4.25 / 5.0** (95% CI [4.12, 4.38]) | ✅ met |
-| RCAEval RE2 R@1 | Competitive w/ CIRCA/RCD | 7.7% (OB only) — below published baselines | ❌ below target; honest finding |
+| RCAEval RE2 R@1 | Competitive w/ CIRCA/RCD | 7.7% (OB only); below published baselines | ❌ below target; honest finding |
 
-Detection latency: the 60s target was set before the Session 11-13 diagnostic
+Detection latency: the 60s target was set before the iterative diagnostic
 work established that a 120-s pre-investigation wait is necessary for the
 `rate()` lookback window to expire stale data. Once that's accounted for,
-OpsAgent detects correctly in >99% of cases — the 125-s figure is dominated
+OpsAgent detects correctly in >99% of cases; the 125-s figure is dominated
 by the injected wait, not algorithmic latency. This is documented in
 `docs/evaluation_results.md` Limitations.
 """),
     md("""\
 ## 8. Reproducibility
 
-- **Git branch:** `main`, Session 16 work uncommitted at time of this notebook run.
+- **Git branch:** `main`.
 - **OTel Demo images:** `ghcr.io/open-telemetry/demo:1.10.0-*`.
 - **LLM models:** `gemini-3-flash-preview` (live OTel Demo), `gemini-2.5-flash` (offline RCAEval).
 - **Fault-injection seed:** `--seed 42` (default in `tests/evaluation/fault_injection_suite.py`).
-- **Session timestamps:**
-  - Session 13 (OpsAgent live): 2026-04-19
-  - Session 14 (baselines): 2026-04-20
-  - Session 15 (RCAEval RE1-OB + RE2-OB): 2026-04-21
-- **Result directories:** `data/evaluation/results_session13/`, `baseline_{rule_based,ad_only,llm_no_tools}/`, `rcaeval_re1_ob/`, `rcaeval_re2_ob/`.
+- **Evaluation timestamps (UTC):**
+  - OpsAgent live (OTel Demo primary track): 2026-04-19
+  - Internal baselines on the same 35-test suite: 2026-04-20
+  - RCAEval RE1-OB + RE2-OB: 2026-04-21
+- **Result directories:** `data/evaluation/results_fault_injection_tests/`, `baseline_{rule_based,ad_only,llm_no_tools}/`, `rcaeval_re1_ob/`, `rcaeval_re2_ob/`.
 - **Aggregated summary:** `data/evaluation/evaluation_summary.json` (this notebook's primary input).
 """),
 ]

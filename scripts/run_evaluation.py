@@ -1,14 +1,14 @@
-"""Aggregate all Phase 5 evaluation results into a single summary JSON.
+"""Aggregate all evaluation results into a single summary JSON.
 
-Loads per-case results from every results directory produced across Sessions
-13-15 (OpsAgent OTel Demo, three internal baselines, two RCAEval-OB variants),
-computes the standard metrics plus Wilson CIs and pairwise McNemar tests, and
-writes ``data/evaluation/evaluation_summary.json`` for the notebook and
-results doc to consume.
+Loads per-case results from every results directory (OpsAgent OTel Demo,
+three internal baselines, two RCAEval-OB variants), computes the standard
+metrics plus Wilson CIs and pairwise McNemar tests, and writes
+``data/evaluation/evaluation_summary.json`` for the notebook and results
+doc to consume.
 
 Where the source directory already contains a pre-computed ``summary.json``
 (RCAEval runs), the aggregator asserts the newly computed numbers match
-within float epsilon — a drift fails the script loudly.
+within float epsilon; a drift fails the script loudly.
 
 Usage::
 
@@ -42,17 +42,17 @@ DEFAULT_OUTPUT = PROJECT_ROOT / "data" / "evaluation" / "evaluation_summary.json
 # "otel_opsagent", "otel_baseline", "rcaeval_offline".
 EVAL_DIRS: list[tuple[str, str, str, str]] = [
     (
-        "opsagent_otel_session13",
-        "data/evaluation/results_session13",
+        "opsagent_otel_primary",
+        "data/evaluation/results_fault_injection_tests",
         "otel_opsagent",
-        "Session 13 — OpsAgent live on the OTel Demo (35 tests, 7 fault types x 5 runs).",
+        "OpsAgent live on the OTel Demo (35 tests, 7 fault types x 5 runs).",
     ),
     (
         "rule_based_otel",
         "data/evaluation/baseline_rule_based",
         "otel_baseline",
         (
-            "Session 14 — Rule-Based baseline on the OTel Demo. One-shot classification; "
+            "Rule-Based baseline on the OTel Demo. One-shot classification; "
             "investigation_duration ~0.1s is not comparable to OpsAgent."
         ),
     ),
@@ -61,9 +61,9 @@ EVAL_DIRS: list[tuple[str, str, str, str]] = [
         "data/evaluation/baseline_ad_only",
         "otel_baseline",
         (
-            "Session 14 — AD-Only baseline on the OTel Demo. Confidence collapses to 1.000 "
-            "due to zero-padding of an 8-dim feature vector into the LSTM-AE's 54-dim input; "
-            "see CLAUDE.md for the pre-existing design limitation."
+            "AD-Only baseline on the OTel Demo. Confidence collapses to 1.000 "
+            "due to zero-padding of an 8-dim feature vector into the LSTM-AE's 54-dim input. "
+            "This is a pre-existing design limitation of the baseline."
         ),
     ),
     (
@@ -71,7 +71,7 @@ EVAL_DIRS: list[tuple[str, str, str, str]] = [
         "data/evaluation/baseline_llm_no_tools",
         "otel_baseline",
         (
-            "Session 14 — LLM-Without-Tools baseline on the OTel Demo. Cart-bias (24/35 "
+            "LLM-Without-Tools baseline on the OTel Demo. Cart-bias (24/35 "
             "predictions = cartservice) driven by baseline ECONNREFUSED log noise."
         ),
     ),
@@ -80,7 +80,7 @@ EVAL_DIRS: list[tuple[str, str, str, str]] = [
         "data/evaluation/rcaeval_re1_ob",
         "rcaeval_offline",
         (
-            "Session 15 — OpsAgent offline-mode on RCAEval RE1-OB. "
+            "OpsAgent offline-mode on RCAEval RE1-OB. "
             "detection_latency_seconds is 0.0 across the board (not measured offline); "
             "MTTR figures equal investigation_duration since there is no pre-investigation wait."
         ),
@@ -90,7 +90,7 @@ EVAL_DIRS: list[tuple[str, str, str, str]] = [
         "data/evaluation/rcaeval_re2_ob",
         "rcaeval_offline",
         (
-            "Session 15 — OpsAgent offline-mode on RCAEval RE2-OB. Same detection_latency "
+            "OpsAgent offline-mode on RCAEval RE2-OB. Same detection_latency "
             "caveat as RE1-OB."
         ),
     ),
@@ -98,9 +98,9 @@ EVAL_DIRS: list[tuple[str, str, str, str]] = [
 
 # Which McNemar pairings to compute. Each tuple: (label, ops_dir_label, baseline_dir_label).
 MCNEMAR_PAIRS: list[tuple[str, str, str]] = [
-    ("opsagent_vs_rule_based", "opsagent_otel_session13", "rule_based_otel"),
-    ("opsagent_vs_ad_only", "opsagent_otel_session13", "ad_only_otel"),
-    ("opsagent_vs_llm_no_tools", "opsagent_otel_session13", "llm_no_tools_otel"),
+    ("opsagent_vs_rule_based", "opsagent_otel_primary", "rule_based_otel"),
+    ("opsagent_vs_ad_only", "opsagent_otel_primary", "ad_only_otel"),
+    ("opsagent_vs_llm_no_tools", "opsagent_otel_primary", "llm_no_tools_otel"),
 ]
 
 FLOAT_EPS = 1e-6
@@ -215,7 +215,7 @@ def aggregate(output_path: Path) -> dict:
             ob_combined_results,
             kind="rcaeval_offline",
             notes=(
-                "Session 15 combined RE1-OB + RE2-OB (n=216). RE3-OB aborted at 4 cases and is "
+                "Combined RE1-OB + RE2-OB (n=216). RE3-OB aborted at 4 cases and is "
                 "excluded. detection_latency_seconds not meaningful offline."
             ),
         )
@@ -242,8 +242,8 @@ def aggregate(output_path: Path) -> dict:
 
         result = mcnemar_test(ops_correct, baseline_correct)
         result["caveat"] = (
-            "Matched by test_id only (same fault_type + run_id). OpsAgent (Session 13) and "
-            "baselines (Session 14) ran on different calendar dates with fresh Docker stacks; "
+            "Matched by test_id only (same fault_type + run_id). The OpsAgent run and the "
+            "baseline runs took place on different calendar dates with fresh Docker stacks; "
             "not experimentally paired."
         )
         summary["mcnemar_tests"][pair_label] = result
