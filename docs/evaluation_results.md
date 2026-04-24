@@ -1,7 +1,7 @@
-# OpsAgent — Phase 5 Evaluation Results
+# OpsAgent Evaluation Results
 
-> Draft of the consolidated evaluation report for the OpsAgent capstone
-> project. Aggregates three evaluation tracks produced across Sessions 13-15:
+> Consolidated evaluation report for the OpsAgent capstone project.
+> Aggregates three evaluation tracks:
 > (1) OTel Demo fault injection on OpsAgent, (2) three internal ablation
 > baselines on the same fault suite, (3) cross-system validation on
 > RCAEval-OB. Numbers in this document are computed from
@@ -14,7 +14,7 @@
 
 OpsAgent achieves **100% Recall@1 and 100% Recall@3 on the OTel Demo fault
 injection track (n=35)** with 95% Wilson confidence interval `[0.901, 1.000]`
-— even the lower bound clears the 80% Phase-5 target. Against the three
+— even the lower bound clears the 80% project target. Against the three
 internal ablation baselines on the same fault suite, OpsAgent's top-1
 advantage is highly significant (McNemar p < 10⁻⁷ against each baseline;
 zero discordant cases where any baseline outperforms OpsAgent).
@@ -28,10 +28,10 @@ custom telemetry detectors (Service Probe Exporter probe_up, memory_utilization
 CRITICAL checks) in the metrics-only RCAEval CSVs. This is a structural
 finding about the approach, not an implementation defect.
 
-Explanation-quality scoring across all 35 Session 13 OpsAgent RCA reports
-(5-point rubric, five sub-dimensions per report) yields a mean overall
-score of **4.25 / 5.0 (95% CI [4.12, 4.38])**, clearing the 4.0 Phase-5
-target with 30/35 reports at or above the threshold. The one systematic
+Explanation-quality scoring across all 35 OpsAgent RCA reports from the
+primary evaluation (5-point rubric, five sub-dimensions per report) yields
+a mean overall score of **4.25 / 5.0 (95% CI [4.12, 4.38])**, clearing the
+4.0 target with 30/35 reports at or above the threshold. The one systematic
 weakness is the agent's narrative on `high_latency` faults, where the
 correct service (frontend) is identified but the component is misdiagnosed
 as a Next.js `/500` error-page bug rather than the tc netem network
@@ -45,7 +45,7 @@ latency injection — see Section 6.
 Astronomy Shop stack (6 services + Redis + loadgenerator, OTel Demo v1.10.0).
 Pre-investigation wait 120 s; per-test cooldowns 120-300 s. Seed 42.
 
-**Headline numbers (Session 13):**
+**Headline numbers:**
 
 | Metric | Value | 95% CI |
 |---|---|---|
@@ -58,8 +58,8 @@ Pre-investigation wait 120 s; per-test cooldowns 120-300 s. Seed 42.
 
 **Per-fault-type breakdown:** 5/5 on every fault family
 (cascading_failure, config_error, connection_exhaustion, high_latency,
-memory_pressure, network_partition, service_crash). Memory_pressure — which
-was the weakest class at 40% in Session 12 — moved to 100% after introducing
+memory_pressure, network_partition, service_crash). Memory_pressure, which
+had previously been the weakest class at 40%, moved to 100% after introducing
 the `container_spec_memory_limit_bytes` gauge and the `memory_utilization`
 CRITICAL detector with peak-based triggering.
 
@@ -81,8 +81,8 @@ pre-investigation wait injected by `tests/evaluation/fault_injection_suite.py`
 — this is needed for Prometheus' `rate()` lookback window (~75 s) to expire
 stale data on crashed services, which is what makes the sparse/stale CRITICAL
 detectors work. Without the wait, crashed-service data appears normal. The
-60 s target was set before Sessions 11-13 established this constraint
-empirically. Effective detection latency (time from fault-injection to when
+60 s target was set before the iterative debugging runs established this
+constraint empirically. Effective detection latency (time from fault-injection to when
 the agent *has all the information it needs to conclude correctly*) is
 closer to 5 s — but this is not what `detection_latency_seconds` measures.
 
@@ -93,8 +93,8 @@ closer to 5 s — but this is not what `detection_latency_seconds` measures.
 **Setup.** The three baselines (Rule-Based, AD-Only, LLM-Without-Tools) were
 run against the same 35-test fault suite via the `BaselineInvestigatorAdapter`
 in `tests/evaluation/baseline_comparison.py`. Each baseline was exercised on
-a freshly recycled Docker stack on 2026-04-20; OpsAgent's Session 13 results
-are from 2026-04-19. Test IDs match 1-to-1 by fault_type + run_id, but this
+a freshly recycled Docker stack on 2026-04-20; OpsAgent's primary evaluation
+results are from 2026-04-19. Test IDs match 1-to-1 by fault_type + run_id, but this
 is "matched by test definition" not experimentally paired — each baseline
 injected its own fault and observed its own metrics.
 
@@ -134,7 +134,7 @@ power is high because of the one-sided discordance.
 | service_crash | 5/5 | 0/5 | 0/5 | 5/5 (coincidental) |
 
 **Memory pressure is unsolvable by any internal baseline** — 0/5 Recall@3 on
-all three — which was the direct motivation for OpsAgent's Session 13
+all three — which was the direct motivation for OpsAgent's
 memory-saturation work.
 
 ### 2.2 Why each baseline fails
@@ -251,8 +251,8 @@ Section 3.3 for analysis.
 Agent collapses toward familiar high-variance services: frontend 39%,
 redis 20%, productcatalogservice 12%, checkoutservice 11%. The LLM has
 strong priors from its OTel Demo training and ranks familiar services above
-unfamiliar ones even with the layered scope-filter mitigations described in
-the Session 15 engineering log.
+unfamiliar ones even with the layered scope-filter mitigations applied in
+the offline RCAEval pipeline.
 
 ---
 
@@ -293,7 +293,7 @@ latency discussion.
 
 ### 4.4 Classifier Precision (from the 35-test suite)
 
-The original Phase-5 precision target (`≥ 70%`) is defined as
+The original precision target (`≥ 70%`) is defined as
 `1 − (false-positive rate during 24 h normal operation)` — a **healthy-
 period** metric that the 35-test fault-injection suite cannot produce by
 construction (every test has an injected fault; there is no no-fault window
@@ -353,7 +353,7 @@ top-1 for most test cases by construction.
   predict.
 - **Doesn't say:** Whether OpsAgent fires spurious alerts during healthy
   24 h operation — that is still unmeasured and would require running the
-  detector pipeline against the Session 8 baseline data
+  detector pipeline against the 24-hour baseline data
   (`data/baseline_with_logs/`) offline. Such a run would produce a genuine
   FP-rate number against the original target; it is listed in Section 7
   as a follow-up.
@@ -380,8 +380,8 @@ We do not render synthetic NetworkX diagrams from these single-line blocks
 ![Agent tool-usage proxy](images/evaluation_charts/06_tool_usage.png)
 
 Tool-usage distribution is a **regex-based proxy** from the RCA-report
-Evidence Chain text because Session 13 result JSONs did not capture per-call
-tool counts. The agent's deterministic sweep at the start of each
+Evidence Chain text because the primary-evaluation result JSONs did not
+capture per-call tool counts. The agent's deterministic sweep at the start of each
 investigation runs 5 metrics × 6 services + 6 log calls = 36 calls per
 investigation, which dominates the distribution by construction. The chart
 is illustrative of which tool *signals* surface in the final report, not a
@@ -391,14 +391,14 @@ precise call-count — see the caveat note on the chart.
 
 ## 6. Explanation Quality
 
-All 35 Session 13 OpsAgent RCA reports were scored against the 5-point rubric
+All 35 OpsAgent RCA reports from the primary evaluation were scored against the 5-point rubric
 in `docs/success_metrics.md`. Each report received 1-5 integer scores across
 five sub-dimensions (root_cause_accuracy, evidence_quality, causal_analysis,
 recommendations, presentation); the overall score is the mean of the five.
 Scores + per-row notes are logged to
 `data/evaluation/explanation_quality_scores.csv`.
 
-**Headline result: mean overall score 4.25 / 5.0, clears the 4.0 Phase-5
+**Headline result: mean overall score 4.25 / 5.0, clears the 4.0
 target with margin. 95% CI [4.12, 4.38].**
 
 ![Explanation quality distribution](images/evaluation_charts/07_quality_distribution.png)
@@ -480,7 +480,7 @@ counterfactual is also the weakest in the dataset (redis_net_rx at 2%).
 
 ### 6.5 Interpretation
 
-OpsAgent's RCA reports meet the Phase 5 explanation-quality target with
+OpsAgent's RCA reports meet the explanation-quality target with
 real margin (mean 4.25, lower-CI bound 4.12, both comfortably above 4.0).
 85.7% of reports score at or above 4.0. The single failure mode that pulls
 down the mean is a systematic one: on `high_latency`, the agent detects
@@ -504,18 +504,18 @@ seed-pinned fault order.
 **Not measured:**
 
 - **Precision (FP-rate during normal operation).** No 24-hour false-positive
-  run was conducted on the live Docker stack. The Phase 5 target of
+  run was conducted on the live Docker stack. The target of
   "Precision ≥ 70% = 1 − FP-rate during 24 h normal operation" remains
   unmeasured in its original form. Section 4.4 reports the complementary
   **classifier precision** (per-class and macro) derived from the 35-test
   suite: OpsAgent scores 1.000 on every class, the baselines 0.00-0.47.
-  A natural follow-up (outside the Week-10 scope) is to run the OpsAgent
-  CRITICAL-detector pipeline offline against the Session 8 24-hour baseline
+  A natural follow-up (outside the scope of this evaluation) is to run the OpsAgent
+  CRITICAL-detector pipeline offline against the 24-hour baseline
   (`data/baseline_with_logs/`, 1440 snapshots, no injected faults) and
   count how many snapshots would fire a CRITICAL signal — that would
   produce a genuine FP-rate number against the original target.
-- **Experimental pairing.** OpsAgent (Session 13) and baselines
-  (Session 14) ran on different calendar dates with freshly recycled
+- **Experimental pairing.** The OpsAgent run and the baseline runs took
+  place on different calendar dates with freshly recycled
   Docker stacks. McNemar's test treats test IDs as matched pairs, but the
   underlying fault injections were not literally the same physical event.
   Zero discordance where baselines win suggests this is not a material
@@ -523,14 +523,14 @@ seed-pinned fault order.
 - **Detection latency as defined.** The reported 125 s figure is dominated
   by the 120 s pre-investigation wait needed for the Prometheus `rate()`
   lookback window to expire stale data on crashed services. The 60 s
-  target was set before this constraint was empirically established in
-  Sessions 11-13.
+  target was set before this constraint was empirically established by
+  the iterative debugging runs.
 - **Cross-system RE3-OB and SS/TT variants.** RE3-OB aborted at 4/30 cases
   due to Gemini 2.5 Flash RPD exhaustion. Sock Shop and Train Ticket
   variants (~490 combined cases) were not evaluated: OpsAgent's topology
   graph and LLM priors are OTel-Demo/OB-trained, and extending them to new
   microservice systems would require per-system topology + vocabulary work
-  beyond the scope of Week 10.
+  beyond the scope of this evaluation.
 - **Published baseline comparisons.** Per-variant OB numbers for CIRCA,
   RCD, CausalRCA, and MicroCause are not published in the RCAEval paper.
   Running them locally is blocked because `RCAEval.baselines` is not in
@@ -538,12 +538,11 @@ seed-pinned fault order.
   `configs/rcaeval_published_baselines.yaml` for the numbers we could
   cite and the sources.
 - **LLM model differs across tracks.** Live OTel Demo uses
-  `gemini-3-flash-preview` (preview-tier, required for Session 13's 100%);
+  `gemini-3-flash-preview` (preview-tier, required for the 100% primary-track result);
   RCAEval offline uses `gemini-2.5-flash` (production, higher RPM/RPD).
   Reasoning capacity is therefore not held constant across the two tracks,
   so the OTel Demo ↔ RCAEval comparison mixes two confounds (detector
-  availability and LLM reasoning). This is documented in CLAUDE.md and in
-  the Session 15 engineering log.
+  availability and LLM reasoning).
 
 **Threats to external validity:**
 
@@ -560,7 +559,7 @@ seed-pinned fault order.
 
 ## 8. Conclusions
 
-OpsAgent **meets the Phase 5 Recall@1 ≥ 80% target with margin to spare**
+OpsAgent **meets the Recall@1 ≥ 80% target with margin to spare**
 on the OTel Demo fault injection track (100%, 95% Wilson lower bound 90.1%)
 and demonstrates a statistically significant advantage over every internal
 ablation baseline (McNemar p < 10⁻⁷). The architectural contribution isn't
@@ -578,30 +577,29 @@ near-random Recall@1 without them. The Recall@3 lift (+6 pp above random)
 shows partial signal, but top-1 ranking fails. This is documented as a
 strength of the specific OTel Demo deployment, not a universal RCA capability.
 
-Phase 5 deliverables (this document + `notebooks/08_evaluation_analysis.ipynb`
-+ 9 visualizations + statistical analysis) are complete once explanation-
-quality scoring (Section 6) lands.
+Evaluation deliverables (this document + `notebooks/08_evaluation_analysis.ipynb`
++ 9 visualizations + statistical analysis) are complete with explanation-
+quality scoring (Section 6) included.
 
 ---
 
 ## 9. Reproducibility
 
-- **Git branch:** `main` (Session 16 work uncommitted at time of writing).
-- **Git SHA (Session 16 start):** `1a01bf5`.
+- **Git branch:** `main`.
+- **Git SHA at evaluation-analysis start:** `1a01bf5`.
 - **OTel Demo images:** `ghcr.io/open-telemetry/demo:1.10.0-*`.
-- **LLM models:** `gemini-3-flash-preview` (live OTel Demo, Session 13),
-  `gemini-2.5-flash` (offline RCAEval, Session 15).
+- **LLM models:** `gemini-3-flash-preview` (live OTel Demo),
+  `gemini-2.5-flash` (offline RCAEval).
 - **Fault-injection seed:** `--seed 42` (default in
   `tests/evaluation/fault_injection_suite.py`).
-- **Session timestamps (UTC):**
-  - Session 13 (OpsAgent live): 2026-04-19
-  - Session 14 (internal baselines): 2026-04-20
-  - Session 15 (RCAEval RE1-OB + RE2-OB): 2026-04-21
+- **Evaluation timestamps (UTC):**
+  - OpsAgent live (OTel Demo primary track): 2026-04-19
+  - Internal baselines on the same 35-test suite: 2026-04-20
+  - RCAEval RE1-OB + RE2-OB: 2026-04-21
 - **Result directories:**
-  - `data/evaluation/results_session13/` (35 JSONs + 35 Markdown RCA reports)
-  - `data/evaluation/baseline_{rule_based,ad_only,llm_no_tools}/` (35 each)
-  - `data/evaluation/rcaeval_re1_ob/` (125 JSONs)
-  - `data/evaluation/rcaeval_re2_ob/` (91 JSONs)
+  - Primary track (OpsAgent, 35 fault-injection tests): 35 JSONs + 35 Markdown RCA reports under `data/evaluation/`.
+  - Internal baselines: `data/evaluation/baseline_{rule_based,ad_only,llm_no_tools}/` (35 each).
+  - RCAEval-OB: `data/evaluation/rcaeval_re1_ob/` (125 JSONs) and `data/evaluation/rcaeval_re2_ob/` (91 JSONs).
 - **Aggregated summary:** `data/evaluation/evaluation_summary.json`
   (regenerated by `poetry run python scripts/run_evaluation.py`).
 - **Visualizations:** `docs/images/evaluation_charts/01..09_*.png`
