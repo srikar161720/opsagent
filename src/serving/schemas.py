@@ -98,11 +98,20 @@ class HealthStatus(BaseModel):
 
 
 class TopologyNode(BaseModel):
+    """A single service node inside a :class:`TopologyResponse`."""
+
     name: str
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
 class TopologyEdge(BaseModel):
+    """A directed dependency edge inside a :class:`TopologyResponse`.
+
+    Convention matches :class:`src.data_collection.topology_extractor.TopologyGraph`:
+    ``source`` is the upstream dependency, ``target`` is the service that
+    calls it.
+    """
+
     source: str
     target: str
     attributes: dict[str, Any] = Field(default_factory=dict)

@@ -156,6 +156,8 @@ def _render_hero(title: str, subtitle: str) -> None:
 
 
 def render_overview() -> None:
+    """Landing page with component health, topology graph, and recent investigations."""
+
     _render_hero(
         "System Overview",
         "Service health, topology, and recent investigations at a glance.",
@@ -487,6 +489,8 @@ def _render_investigation_result(response: dict[str, Any], elapsed: float) -> No
 
 
 def render_history() -> None:
+    """Paginated table of past investigations with root-cause and confidence columns."""
+
     _render_hero(
         "Investigation History",
         "All investigations since the API last started (in-memory, capped at 100).",
@@ -550,6 +554,8 @@ def render_history() -> None:
 
 
 def render_metrics() -> None:
+    """Embeds the Grafana service-overview dashboard via an iframe."""
+
     _render_hero(
         "Real-Time Metrics",
         "Live Grafana dashboard — Service Overview (CPU, memory, network, probes).",
@@ -575,6 +581,8 @@ def render_metrics() -> None:
 
 
 def render_settings() -> None:
+    """Shows health summary, endpoint URLs, and version metadata."""
+
     _render_hero(
         "Settings",
         "Configuration snapshot. Edits require a restart of the API for now.",
